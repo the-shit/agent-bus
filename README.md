@@ -91,6 +91,25 @@ nats kv put sessions demo '{"sessionId":"demo"}'
 nats kv get sessions demo
 ```
 
-The Laravel app, the CLI, the hooks, and the sidecar come next.
+## Emit and send
+
+Hooks call `bin/agent-bus`. Composer autoload only — Laravel does not boot.
+
+```bash
+bin/agent-bus emit --type=toolCall --payload='{"tool":"composer"}'
+# sessionId from --session or AGENT_BUS_SESSION_ID
+# broker down: exit 0, one stderr line
+
+bin/agent-bus send --session 01a08ef9-2515-7460-89bd-5efc21f28642 --payload='{"text":"ping"}'
+# unknown session: fail closed
+
+bin/agent-bus heartbeat --session 01a08ef9-2515-7460-89bd-5efc21f28642
+bin/agent-bus sessions
+bin/agent-bus sessions get 01a08ef9-2515-7460-89bd-5efc21f28642
+```
+
+Connects to `nats://127.0.0.1:4222`. Override with `NATS_URL`.
+
+The hooks and the sidecar come next.
 
 [Pint and Pest](https://github.com/the-shit/agent-bus/actions/workflows/tests.yml) run on every pull request.
