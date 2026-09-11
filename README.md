@@ -74,3 +74,5 @@ docker compose up -d
 ```
 
 That is the broker. The Laravel app, the CLI, the hooks, and the sidecar come next.
+
+[Pint and Pest](https://github.com/the-shit/agent-bus/actions/workflows/tests.yml) run on every pull request.
