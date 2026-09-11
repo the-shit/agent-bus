@@ -92,3 +92,5 @@ nats kv get sessions demo
 ```
 
 The Laravel app, the CLI, the hooks, and the sidecar come next.
+
+[Pint and Pest](https://github.com/the-shit/agent-bus/actions/workflows/tests.yml) run on every pull request.
