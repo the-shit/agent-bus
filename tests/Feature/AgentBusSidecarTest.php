@@ -31,7 +31,7 @@ it('prompts the mapped pane with the inbox JSON', function () {
     expect($pane)->toBe($paneId);
 
     Process::assertRan(function (PendingProcess $process) use ($paneId, $body) {
-        return $process->command === ['herdr', 'agent', 'prompt', $paneId, '--', $body];
+        return $process->command === ['herdr', 'agent', 'prompt', $paneId, $body];
     });
 });
 
@@ -122,7 +122,7 @@ it('rebuilds the map when herdr list changes', function () {
         ->and($second)->toBe([$sessionId => 'w2:p8'])
         ->and($pane)->toBe('w2:p8')
         ->and($prompted)->toBe([
-            ['herdr', 'agent', 'prompt', 'w2:p8', '--', $body],
+            ['herdr', 'agent', 'prompt', 'w2:p8', $body],
         ]);
 });
 
@@ -158,7 +158,7 @@ it('ticks by consuming inbox JSON and prompting the mapped pane', function () {
     ]);
 
     Process::assertRan(function (PendingProcess $process) use ($paneId, $body) {
-        return $process->command === ['herdr', 'agent', 'prompt', $paneId, '--', $body];
+        return $process->command === ['herdr', 'agent', 'prompt', $paneId, $body];
     });
 });
 
@@ -221,7 +221,7 @@ it('consumes an inbox message and would prompt this pane', function () {
         ->assertSuccessful();
 
     Process::assertRan(function (PendingProcess $process) use ($paneId, $body) {
-        return $process->command === ['herdr', 'agent', 'prompt', $paneId, '--', $body];
+        return $process->command === ['herdr', 'agent', 'prompt', $paneId, $body];
     });
 })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
 

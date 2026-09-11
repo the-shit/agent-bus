@@ -28,7 +28,6 @@ class Herdr
             'agent',
             'prompt',
             $paneId,
-            '--',
             $json,
         ]);
 
