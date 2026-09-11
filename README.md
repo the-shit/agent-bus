@@ -110,6 +110,28 @@ bin/agent-bus sessions get 01a08ef9-2515-7460-89bd-5efc21f28642
 
 Connects to `nats://127.0.0.1:4222`. Override with `NATS_URL`.
 
-The hooks and the sidecar come next.
+## Host sidecar
+
+One process per host. It maps Grok session ids from `herdr agent list` (`agent_session.value` → `pane_id`) onto KV `sessions`, then injects inbox JSON with `herdr agent prompt` so the **model** sees it. No paste. No markdown drop. No `wtype`.
+
+```bash
+php artisan nats:provision
+php artisan agent-bus:sidecar
+# or: bin/agent-bus-sidecar
+```
+
+Leave it running. From another pane (session A):
+
+```bash
+bin/agent-bus send --session <B> --payload '{"text":"ping"}'
+```
+
+Session B's next turn contains that JSON. Restart the sidecar, send again, it still delivers.
+
+Pest proves the map and that the sidecar would prompt that pane (Herdr is faked; NATS tests skip when the broker is down). Live two-Grok prove is the issue, not CI.
+
+```bash
+php artisan test --compact tests/Feature/AgentBusSidecarTest.php tests/Unit/Bus/SessionPaneMapTest.php
+```
 
 [Pint and Pest](https://github.com/the-shit/agent-bus/actions/workflows/tests.yml) run on every pull request.

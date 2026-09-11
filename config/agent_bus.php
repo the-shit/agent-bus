@@ -15,4 +15,14 @@ return [
         'ttl_seconds' => (int) env('AGENT_BUS_KV_TTL', 90),
     ],
 
+    'herdr' => [
+        'binary' => env('AGENT_BUS_HERDR', 'herdr'),
+    ],
+
+    'sidecar' => [
+        'consumer' => env('AGENT_BUS_SIDECAR_CONSUMER'),
+        'batch' => (int) env('AGENT_BUS_SIDECAR_BATCH', 8),
+        'expires' => (float) env('AGENT_BUS_SIDECAR_EXPIRES', 0.5),
+    ],
+
 ];

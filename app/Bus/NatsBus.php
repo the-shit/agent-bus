@@ -2,7 +2,10 @@
 
 namespace App\Bus;
 
+use Basis\Nats\Consumer\AckPolicy;
+use Basis\Nats\Consumer\DeliverPolicy;
 use Basis\Nats\KeyValue\Bucket;
+use Basis\Nats\Message\Payload;
 use Basis\Nats\Stream\Stream;
 use JsonException;
 use LaravelNats\Laravel\NatsV2Gateway;
@@ -138,6 +141,76 @@ class NatsBus
         $value = $this->bucket()->get($id);
 
         return is_string($value) ? $value : null;
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function listSessionIds(): array
+    {
+        $ids = [];
+
+        foreach ($this->bucket()->getAll() as $entry) {
+            if ($entry->key !== '') {
+                $ids[$entry->key] = $entry->key;
+            }
+        }
+
+        return array_values($ids);
+    }
+
+    public function sidecarConsumerName(): string
+    {
+        $configured = config('agent_bus.sidecar.consumer');
+
+        if (is_string($configured) && $configured !== '') {
+            return $configured;
+        }
+
+        $host = preg_replace('/[^A-Za-z0-9_-]+/', '-', gethostname() ?: 'host') ?? 'host';
+        $host = trim($host, '-');
+
+        if ($host === '') {
+            $host = 'host';
+        }
+
+        return 'agent-bus-sidecar-'.$host;
+    }
+
+    public function ensureInboxConsumer(): void
+    {
+        $consumer = $this->stream()->getConsumer($this->sidecarConsumerName());
+
+        if (! $consumer->exists()) {
+            $consumer->getConfiguration()
+                ->setSubjectFilter('session.*.inbox')
+                ->setDeliverPolicy(DeliverPolicy::NEW)
+                ->setAckPolicy(AckPolicy::EXPLICIT);
+            $consumer->create();
+        }
+    }
+
+    /**
+     * Pull one inbox batch. Unknown sessions are acked (dropped) by the caller returning normally.
+     *
+     * @param  callable(string, string): void  $handler
+     */
+    public function consumeInbox(callable $handler, int $iterations = 1): int
+    {
+        $this->ensureInboxConsumer();
+
+        $batch = (int) config('agent_bus.sidecar.batch', 8);
+        $expires = (float) config('agent_bus.sidecar.expires', 0.5);
+
+        $consumer = $this->stream()->getConsumer($this->sidecarConsumerName());
+        $consumer->setIterations(max(1, $iterations));
+        $consumer->setBatching(max(1, $batch));
+        $consumer->setExpires($expires > 0 ? $expires : 0.5);
+
+        return $consumer->handle(function (Payload $payload) use ($handler): void {
+            $subject = is_string($payload->subject) ? $payload->subject : '';
+            $handler($subject, $payload->body);
+        });
     }
 
     private function stream(): Stream

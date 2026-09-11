@@ -40,7 +40,8 @@
         }
     },
     "bin": [
-        "bin/agent-bus"
+        "bin/agent-bus",
+        "bin/agent-bus-sidecar"
     ],
     "scripts": {
         "setup": [
