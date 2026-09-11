@@ -71,8 +71,26 @@ Hooks already get `sessionId`, `cwd`, `toolName` on stdin. A tiny `agent-bus emi
 ```bash
 docker compose up -d
 # client port 4222, HTTP monitor 8222
+php artisan nats:provision
 ```
 
-That is the broker. The Laravel app, the CLI, the hooks, and the sidecar come next.
+That stands JetStream stream `AGENT_BUS` (subjects `repo.>`, `session.>`) and KV bucket `sessions` (history 1, 90s TTL). Running provision twice is a no-op.
+
+Prove with Pest (skips if nothing is listening on 4222 — it does not pretend it published):
+
+```bash
+php artisan test --compact tests/Feature/NatsBusTest.php
+```
+
+Prove with the nats CLI if you have it:
+
+```bash
+nats stream info AGENT_BUS
+nats kv info sessions
+nats kv put sessions demo '{"sessionId":"demo"}'
+nats kv get sessions demo
+```
+
+The Laravel app, the CLI, the hooks, and the sidecar come next.
 
 [Pint and Pest](https://github.com/the-shit/agent-bus/actions/workflows/tests.yml) run on every pull request.
