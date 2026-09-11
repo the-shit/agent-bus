@@ -1,0 +1,8 @@
+#!/usr/bin/env php
+<?php
+
+use App\Bus\Cli;
+
+require __DIR__.'/../vendor/autoload.php';
+
+exit((new Cli)->run($argv));

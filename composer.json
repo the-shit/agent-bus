@@ -39,6 +39,9 @@
             "Tests\\": "tests/"
         }
     },
+    "bin": [
+        "bin/agent-bus"
+    ],
     "scripts": {
         "setup": [
             "composer install",
