@@ -1,0 +1,9 @@
+{
+    "type": "session.updated",
+    "properties": {
+        "info": {
+            "id": "oc-session-1",
+            "title": "noise"
+        }
+    }
+}

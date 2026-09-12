@@ -76,12 +76,21 @@ class NatsBus
 
         $ttlSeconds = (int) config('agent_bus.kv.ttl_seconds', 90);
         $history = (int) config('agent_bus.kv.history', 1);
+        $ttlNanos = $ttlSeconds * 1_000_000_000;
 
         $bucket = $this->bucket();
         $bucket->getConfiguration()
             ->setHistory($history)
-            ->setTtl($ttlSeconds * 1_000_000_000);
-        $bucket->getStream();
+            ->setTtl($ttlNanos);
+
+        $stream = $bucket->getStream();
+        $bucket->getConfiguration()->configureStream($stream->getConfiguration());
+        $stream->update();
+    }
+
+    public function sessionTtlNanos(): int
+    {
+        return $this->bucket()->getStatus()->ttl;
     }
 
     public function streamExists(): bool
@@ -136,6 +145,11 @@ class NatsBus
         $this->bucket()->put($id, $json);
     }
 
+    public function deleteSession(string $id): void
+    {
+        $this->bucket()->delete($id);
+    }
+
     public function getSession(string $id): ?string
     {
         $value = $this->bucket()->get($id);
@@ -151,7 +165,7 @@ class NatsBus
         $ids = [];
 
         foreach ($this->bucket()->getAll() as $entry) {
-            if ($entry->key !== '') {
+            if ($entry->key !== '' && is_string($entry->value) && $entry->value !== '') {
                 $ids[$entry->key] = $entry->key;
             }
         }

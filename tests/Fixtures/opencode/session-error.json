@@ -1,0 +1,9 @@
+{
+    "type": "session.error",
+    "properties": {
+        "sessionID": "oc-session-1",
+        "error": {
+            "message": "boom"
+        }
+    }
+}

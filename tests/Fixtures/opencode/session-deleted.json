@@ -1,0 +1,8 @@
+{
+    "type": "session.deleted",
+    "properties": {
+        "info": {
+            "id": "oc-session-1"
+        }
+    }
+}

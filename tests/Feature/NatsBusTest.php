@@ -33,6 +33,13 @@ it('does not fail when nats:provision runs twice', function () {
     $this->artisan('nats:provision')->assertSuccessful();
 })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
 
+it('gives KV sessions a 90 second TTL', function () {
+    $bus = app(NatsBus::class);
+    $bus->provision();
+
+    expect($bus->sessionTtlNanos())->toBe(90_000_000_000);
+})->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+
 it('publishes a JSON envelope and reads it back', function () {
     $bus = app(NatsBus::class);
     $bus->provision();

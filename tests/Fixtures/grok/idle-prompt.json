@@ -1,0 +1,8 @@
+{
+    "hookEventName": "notification",
+    "hook_event_name": "Notification",
+    "notificationType": "idle_prompt",
+    "sessionId": "01a08ef9-2515-7460-89bd-5efc21f28642",
+    "cwd": "/home/you/agent-bus",
+    "timestamp": "2026-09-11T06:01:00Z"
+}

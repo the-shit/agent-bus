@@ -64,7 +64,10 @@ class Cli
             'emit' => $this->emit($options),
             'send' => $this->send($options),
             'heartbeat' => $this->heartbeat($options),
+            'session-end' => $this->sessionEnd($options),
             'sessions' => $this->sessions($positionals),
+            'hook' => $this->fromStdin(GrokHook::class),
+            'opencode' => $this->fromStdin(OpenCodeCapture::class),
             default => $this->usage(),
         };
     }
@@ -129,12 +132,14 @@ class Cli
     private function heartbeat(array $options): int
     {
         $sessionId = $this->sessionId($options, required: true);
+        $now = gmdate('Y-m-d\TH:i:s\Z');
         $presence = [
             'sessionId' => $sessionId,
             'agentType' => $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'),
             'model' => $this->option($options, 'model', 'AGENT_BUS_MODEL'),
             'repo' => $this->repo(),
-            'timestamp' => gmdate('Y-m-d\TH:i:s\Z'),
+            'timestamp' => $now,
+            'lastSeen' => $now,
         ];
 
         try {
@@ -177,7 +182,7 @@ class Cli
         $ids = [];
 
         foreach ($this->client()->getApi()->getBucket($this->kvBucket())->getAll() as $entry) {
-            if ($entry->key !== '') {
+            if ($entry->key !== '' && is_string($entry->value) && $entry->value !== '') {
                 $ids[$entry->key] = $entry->key;
             }
         }
@@ -226,6 +231,114 @@ class Cli
     private function putSession(string $id, string $json): void
     {
         $this->client()->getApi()->getBucket($this->kvBucket())->put($id, $json);
+    }
+
+    /**
+     * @param  array<string, string>  $options
+     */
+    private function sessionEnd(array $options): int
+    {
+        $sessionId = $this->sessionId($options, required: true);
+
+        try {
+            $this->deleteSession($sessionId);
+        } catch (Throwable $exception) {
+            fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
+
+            return 1;
+        }
+
+        return 0;
+    }
+
+    private function deleteSession(string $id): void
+    {
+        $this->client()->getApi()->getBucket($this->kvBucket())->delete($id);
+    }
+
+    /**
+     * @param  class-string<GrokHook|OpenCodeCapture>  $mapper
+     */
+    private function fromStdin(string $mapper): int
+    {
+        try {
+            $raw = stream_get_contents(STDIN);
+
+            if (! is_string($raw) || trim($raw) === '') {
+                return 0;
+            }
+
+            try {
+                $event = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+            } catch (JsonException) {
+                return 0;
+            }
+
+            if (! is_array($event)) {
+                return 0;
+            }
+
+            foreach ($mapper::actions($event) as $action) {
+                $this->perform($action);
+            }
+        } catch (Throwable $exception) {
+            fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
+        }
+
+        return 0;
+    }
+
+    private function perform(CaptureAction $action): void
+    {
+        $options = [
+            'session' => $action->sessionId,
+            'agent-type' => $action->agentType,
+            'type' => $action->type !== '' ? $action->type : 'capture',
+            'payload' => json_encode($action->payload, JSON_THROW_ON_ERROR),
+        ];
+
+        if ($action->model !== '') {
+            $options['model'] = $action->model;
+        }
+
+        try {
+            match ($action->verb) {
+                'emit' => $this->publishQuiet($options),
+                'heartbeat' => $this->heartbeatQuiet($options),
+                'sessionEnd' => $this->deleteSession($action->sessionId),
+                default => null,
+            };
+        } catch (Throwable $exception) {
+            fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
+        }
+    }
+
+    /**
+     * @param  array<string, string>  $options
+     */
+    private function publishQuiet(array $options): void
+    {
+        $envelope = $this->envelope($options, requireSession: false);
+        $this->publish($this->repoSubject($envelope), $envelope);
+    }
+
+    /**
+     * @param  array<string, string>  $options
+     */
+    private function heartbeatQuiet(array $options): void
+    {
+        $sessionId = $this->sessionId($options, required: true);
+        $now = gmdate('Y-m-d\TH:i:s\Z');
+        $presence = [
+            'sessionId' => $sessionId,
+            'agentType' => $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'),
+            'model' => $this->option($options, 'model', 'AGENT_BUS_MODEL'),
+            'repo' => $this->repo(),
+            'timestamp' => $now,
+            'lastSeen' => $now,
+        ];
+
+        $this->putSession($sessionId, json_encode($presence, JSON_THROW_ON_ERROR));
     }
 
     /**
@@ -427,8 +540,11 @@ Usage:
   bin/agent-bus emit --type=<type> [--payload=<json>] [--session=<id>] [--agent-type=<name>] [--model=<name>]
   bin/agent-bus send --session=<id> --payload=<json>
   bin/agent-bus heartbeat --session=<id>
+  bin/agent-bus session-end --session=<id>
   bin/agent-bus sessions
   bin/agent-bus sessions get <id>
+  bin/agent-bus hook
+  bin/agent-bus opencode
 TXT."\n");
 
         return 1;
