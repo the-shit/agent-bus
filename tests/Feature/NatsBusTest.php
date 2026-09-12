@@ -13,32 +13,32 @@ it('reports the broker is unreachable when nothing listens', function () {
     expect(app(NatsBus::class)->isReachable())->toBeFalse();
 });
 
-it('fails nats:provision when the broker is down', function () {
+it('fails provision when the broker is down', function () {
     config(['nats_basis.connections.default.port' => 1]);
 
-    $this->artisan('nats:provision')->assertFailed();
+    $this->artisan('provision')->assertFailed();
 });
 
 it('creates stream AGENT_BUS and KV bucket sessions', function () {
     $bus = app(NatsBus::class);
 
-    $this->artisan('nats:provision')->assertSuccessful();
+    $this->artisan('provision')->assertSuccessful();
 
     expect($bus->streamExists())->toBeTrue()
         ->and($bus->kvBucketExists())->toBeTrue();
-})->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
-it('does not fail when nats:provision runs twice', function () {
-    $this->artisan('nats:provision')->assertSuccessful();
-    $this->artisan('nats:provision')->assertSuccessful();
-})->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+it('does not fail when provision runs twice', function () {
+    $this->artisan('provision')->assertSuccessful();
+    $this->artisan('provision')->assertSuccessful();
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
 it('gives KV sessions a 90 second TTL', function () {
     $bus = app(NatsBus::class);
     $bus->provision();
 
     expect($bus->sessionTtlNanos())->toBe(90_000_000_000);
-})->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
 it('publishes a JSON envelope and reads it back', function () {
     $bus = app(NatsBus::class);
@@ -67,4 +67,4 @@ it('publishes a JSON envelope and reads it back', function () {
     $bus->putSession($sessionId, $json);
 
     expect($bus->getSession($sessionId))->toBe($json);
-})->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
