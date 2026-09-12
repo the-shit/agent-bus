@@ -1,0 +1,9 @@
+{
+    "type": "session.created",
+    "properties": {
+        "info": {
+            "id": "oc-session-1",
+            "directory": "/home/you/agent-bus"
+        }
+    }
+}

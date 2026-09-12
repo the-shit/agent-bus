@@ -1,0 +1,12 @@
+{
+    "hookEventName": "post_tool_use",
+    "hook_event_name": "PostToolUse",
+    "sessionId": "01a08ef9-2515-7460-89bd-5efc21f28642",
+    "cwd": "/home/you/agent-bus",
+    "workspaceRoot": "/home/you/agent-bus",
+    "toolName": "run_terminal_command",
+    "toolInput": {
+        "command": "composer test"
+    },
+    "timestamp": "2026-09-11T06:00:00Z"
+}

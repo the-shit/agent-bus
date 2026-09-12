@@ -8,7 +8,7 @@ Coding agents that can't see each other are just expensive tabs. This is the bus
 
 NATS JetStream so Grok Build and OpenCode sessions can discover peers, subscribe to tool calls and idle, and send JSON to a live session — no pasting into someone else's TUI.
 
-Laravel 13 skeleton. The bus is not wired yet. The spec below is what we are building.
+Laravel 13. First clients board **this** NATS bus (JetStream `AGENT_BUS` + KV `sessions`). Not Cloudflare Durable Objects.
 
 ## The lie
 
@@ -109,6 +109,24 @@ bin/agent-bus sessions get 01a08ef9-2515-7460-89bd-5efc21f28642
 ```
 
 Connects to `nats://127.0.0.1:4222`. Override with `NATS_URL`.
+
+```bash
+bin/agent-bus session-end --session 01a08ef9-2515-7460-89bd-5efc21f28642
+# crash net is KV TTL 90s; this is the polite leave
+```
+
+## Board Grok Build and OpenCode
+
+This repo ships the adapters. They only map the README allowlist onto `bin/agent-bus`.
+
+- Grok: `.grok/hooks/agent-bus.json` → `bin/agent-bus hook` (stdin JSON). Trust the folder (`/hooks-trust`) so project hooks run.
+- OpenCode: `.opencode/plugin/agent-bus.js` → `bin/agent-bus opencode`.
+
+A PostToolUse / `tool.execute.after` for `run_terminal_command` publishes **one** `toolCall` on `repo.{owner}.{name}.toolCall`. `phase_changed` and other unlisted events publish nothing. Dead broker: `hook` / `opencode` exit 0, no Laravel stack trace.
+
+To board every Grok session on the machine, copy `hooks/grok.json` to `~/.grok/hooks/` and replace `/ABS/PATH/TO/agent-bus` with this checkout. Do not install that from CI.
+
+Heartbeat PUTs presence JSON (`sessionId`, `agentType`, `repo`, `lastSeen`). `sessions` lists the id. Stop heartbeats: the KV key is gone within 90s. `sessionEnd` deletes immediately.
 
 ## Host sidecar
 

@@ -152,7 +152,9 @@ describe('heartbeat and sessions', function () {
 
         expect($printed['sessionId'])->toBe($sessionId)
             ->and($printed['repo'])->toBe('the-shit/agent-bus')
-            ->and($stored)->toBe($printed);
+            ->and($printed['lastSeen'])->toMatch('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/')
+            ->and($stored)->toBe($printed)
+            ->and($stored['lastSeen'])->toBe($printed['lastSeen']);
     })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
 
     it('lists session ids and prints one session from KV', function () {
@@ -176,13 +178,164 @@ describe('heartbeat and sessions', function () {
     })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
 });
 
+describe('hook capture', function () {
+    it('maps PostToolUse stdin to one toolCall and exits 0 when the broker is down', function () {
+        $result = agentBusCliWithStdin(
+            ['hook'],
+            (string) file_get_contents(base_path('tests/Fixtures/grok/post-tool-use.json')),
+            ['NATS_URL' => 'nats://127.0.0.1:1'],
+        );
+
+        expect($result->exitCode())->toBe(0)
+            ->and($result->output())->toBe('')
+            ->and($result->errorOutput())
+            ->not->toContain('Stack trace')
+            ->not->toContain('Illuminate\\')
+            ->not->toContain('artisan');
+    });
+
+    it('drops phase_changed and exits 0 without publishing', function () {
+        $result = agentBusCliWithStdin(
+            ['hook'],
+            (string) file_get_contents(base_path('tests/Fixtures/grok/phase-changed.json')),
+            ['NATS_URL' => 'nats://127.0.0.1:1'],
+        );
+
+        expect($result->exitCode())->toBe(0)
+            ->and($result->output())->toBe('')
+            ->and($result->errorOutput())->toBe('');
+    });
+
+    it('exits 0 on invalid JSON so a dead or junk hook does not block the tool', function () {
+        $result = agentBusCliWithStdin(
+            ['hook'],
+            'not-json',
+            ['NATS_URL' => 'nats://127.0.0.1:1'],
+        );
+
+        expect($result->exitCode())->toBe(0)
+            ->and($result->output())->toBe('');
+    });
+
+    it('publishes exactly one toolCall envelope from PostToolUse', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $stdin = (string) file_get_contents(base_path('tests/Fixtures/grok/post-tool-use.json'));
+        $result = agentBusCliWithStdin(['hook'], $stdin);
+
+        expect($result->exitCode())->toBe(0)
+            ->and($result->output())->toBe('');
+
+        $envelope = $bus->lastEnvelope('repo.the-shit.agent-bus.toolCall');
+
+        expect($envelope)
+            ->toHaveKeys(['sessionId', 'agentType', 'repo', 'type', 'timestamp', 'payload'])
+            ->and($envelope['type'])->toBe('toolCall')
+            ->and($envelope['sessionId'])->toBe('01a08ef9-2515-7460-89bd-5efc21f28642')
+            ->and($envelope['agentType'])->toBe('grok')
+            ->and($envelope['payload']['tool'])->toBe('run_terminal_command');
+    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+
+    it('does not publish a phase_changed subject', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $result = agentBusCliWithStdin(
+            ['hook'],
+            (string) file_get_contents(base_path('tests/Fixtures/grok/phase-changed.json')),
+        );
+
+        expect($result->exitCode())->toBe(0);
+
+        $published = true;
+        try {
+            $bus->lastEnvelope('repo.the-shit.agent-bus.phase_changed');
+        } catch (Throwable) {
+            $published = false;
+        }
+
+        expect($published)->toBeFalse();
+    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+});
+
+describe('opencode capture', function () {
+    it('maps tool.execute.after onto the same emit path and exits 0 when the broker is down', function () {
+        $result = agentBusCliWithStdin(
+            ['opencode'],
+            (string) file_get_contents(base_path('tests/Fixtures/opencode/tool-execute-after.json')),
+            ['NATS_URL' => 'nats://127.0.0.1:1'],
+        );
+
+        expect($result->exitCode())->toBe(0)
+            ->and($result->output())->toBe('')
+            ->and($result->errorOutput())
+            ->not->toContain('Stack trace')
+            ->not->toContain('Illuminate\\')
+            ->not->toContain('artisan');
+    });
+
+    it('does not publish unlisted OpenCode events', function () {
+        $result = agentBusCliWithStdin(
+            ['opencode'],
+            (string) file_get_contents(base_path('tests/Fixtures/opencode/session-updated.json')),
+            ['NATS_URL' => 'nats://127.0.0.1:1'],
+        );
+
+        expect($result->exitCode())->toBe(0)
+            ->and($result->output())->toBe('')
+            ->and($result->errorOutput())->toBe('');
+    });
+
+    it('publishes one toolCall envelope from tool.execute.after', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $result = agentBusCliWithStdin(
+            ['opencode'],
+            (string) file_get_contents(base_path('tests/Fixtures/opencode/tool-execute-after.json')),
+        );
+
+        expect($result->exitCode())->toBe(0);
+
+        $envelope = $bus->lastEnvelope('repo.the-shit.agent-bus.toolCall');
+
+        expect($envelope['type'])->toBe('toolCall')
+            ->and($envelope['agentType'])->toBe('opencode')
+            ->and($envelope['sessionId'])->toBe('oc-session-1')
+            ->and($envelope['payload']['tool'])->toBe('run_terminal_command');
+    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+});
+
+describe('session-end', function () {
+    it('removes the KV key so sessions no longer lists it', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $sessionId = 'cli-session-end';
+        agentBusCli(['heartbeat', '--session='.$sessionId, '--agent-type=grok']);
+
+        $listed = json_decode(agentBusCli(['sessions'])->output(), true);
+        expect($listed)->toContain($sessionId);
+
+        $result = agentBusCli(['session-end', '--session='.$sessionId]);
+
+        expect($result->exitCode())->toBe(0);
+
+        $after = json_decode(agentBusCli(['sessions'])->output(), true);
+        expect($after)->not->toContain($sessionId);
+    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+});
+
 it('loads composer autoload and does not boot artisan', function () {
     $bin = file_get_contents(base_path('bin/agent-bus'));
 
     expect($bin)
         ->toContain("require __DIR__.'/../vendor/autoload.php'")
         ->not->toContain('bootstrap/app.php')
-        ->not->toContain('artisan');
+        ->not->toContain('artisan')
+        ->not->toContain('wrangler')
+        ->not->toContain('DurableObject');
 });
 
 /**
@@ -194,6 +347,23 @@ function agentBusCli(array $arguments, array $environment = []): ProcessResult
     return Process::path(base_path())
         ->timeout(5)
         ->env($environment)
+        ->run([
+            PHP_BINARY,
+            base_path('bin/agent-bus'),
+            ...$arguments,
+        ]);
+}
+
+/**
+ * @param  list<string>  $arguments
+ * @param  array<string, string>  $environment
+ */
+function agentBusCliWithStdin(array $arguments, string $stdin, array $environment = []): ProcessResult
+{
+    return Process::path(base_path())
+        ->timeout(5)
+        ->env($environment)
+        ->input($stdin)
         ->run([
             PHP_BINARY,
             base_path('bin/agent-bus'),
