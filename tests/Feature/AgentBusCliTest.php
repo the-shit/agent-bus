@@ -1,5 +1,6 @@
 <?php
 
+use App\Bus\Cli;
 use App\Bus\NatsBus;
 use Illuminate\Contracts\Process\ProcessResult;
 use Illuminate\Support\Facades\Process;
@@ -65,7 +66,7 @@ describe('emit', function () {
             ->and($printed['timestamp'])->toMatch('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/')
             ->and($printed['payload'])->toBe(['tool' => 'composer'])
             ->and($bus->lastEnvelope($subject))->toBe($printed);
-    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
 
 describe('send', function () {
@@ -106,7 +107,7 @@ describe('send', function () {
         }
 
         expect($published)->toBeFalse();
-    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
     it('publishes to session.{id}.inbox when KV has the session', function () {
         $bus = app(NatsBus::class);
@@ -129,7 +130,7 @@ describe('send', function () {
         expect($printed['sessionId'])->toBe($sessionId)
             ->and($printed['payload'])->toBe(['text' => 'ping'])
             ->and($bus->lastEnvelope('session.'.$sessionId.'.inbox'))->toBe($printed);
-    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
 
 describe('heartbeat and sessions', function () {
@@ -155,7 +156,7 @@ describe('heartbeat and sessions', function () {
             ->and($printed['lastSeen'])->toMatch('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/')
             ->and($stored)->toBe($printed)
             ->and($stored['lastSeen'])->toBe($printed['lastSeen']);
-    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
     it('lists session ids and prints one session from KV', function () {
         $bus = app(NatsBus::class);
@@ -175,7 +176,7 @@ describe('heartbeat and sessions', function () {
 
         expect($get->exitCode())->toBe(0)
             ->and(trim($get->output()))->toBe($json);
-    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
 
 describe('hook capture', function () {
@@ -235,7 +236,7 @@ describe('hook capture', function () {
             ->and($envelope['sessionId'])->toBe('01a08ef9-2515-7460-89bd-5efc21f28642')
             ->and($envelope['agentType'])->toBe('grok')
             ->and($envelope['payload']['tool'])->toBe('run_terminal_command');
-    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
     it('does not publish a phase_changed subject', function () {
         $bus = app(NatsBus::class);
@@ -256,7 +257,7 @@ describe('hook capture', function () {
         }
 
         expect($published)->toBeFalse();
-    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
 
 describe('opencode capture', function () {
@@ -304,7 +305,7 @@ describe('opencode capture', function () {
             ->and($envelope['agentType'])->toBe('opencode')
             ->and($envelope['sessionId'])->toBe('oc-session-1')
             ->and($envelope['payload']['tool'])->toBe('run_terminal_command');
-    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
 
 describe('session-end', function () {
@@ -324,18 +325,51 @@ describe('session-end', function () {
 
         $after = json_decode(agentBusCli(['sessions'])->output(), true);
         expect($after)->not->toContain($sessionId);
-    })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
 
-it('loads composer autoload and does not boot artisan', function () {
-    $bin = file_get_contents(base_path('bin/agent-bus'));
+describe('hot path', function () {
+    it('loads no framework class for any hook verb', function (string $argv) {
+        $out = tempnam(sys_get_temp_dir(), 'agent-bus-probe-');
 
-    expect($bin)
-        ->toContain("require __DIR__.'/../vendor/autoload.php'")
-        ->not->toContain('bootstrap/app.php')
-        ->not->toContain('artisan')
-        ->not->toContain('wrangler')
-        ->not->toContain('DurableObject');
+        $result = Process::path(base_path())
+            ->timeout(10)
+            ->env([
+                'NATS_URL' => 'nats://127.0.0.1:1',
+                'AGENT_BUS_PROBE_BIN' => base_path('bin/agent-bus'),
+                'AGENT_BUS_PROBE_OUT' => $out,
+                'AGENT_BUS_PROBE_ARGV' => $argv,
+            ])
+            ->input('{}')
+            ->run([PHP_BINARY, base_path('tests/Fixtures/hot-path-probe.php')]);
+
+        $loaded = json_decode((string) file_get_contents($out), true);
+        unlink($out);
+
+        expect($loaded)->toBeArray()
+            ->and($loaded)->toBe([])
+            ->and($result->errorOutput())
+            ->not->toContain('Stack trace')
+            ->not->toContain('LaravelZero');
+    })->with([
+        'emit' => ['emit --type=probe --session=probe'],
+        'heartbeat' => ['heartbeat --session=probe'],
+        'session-end' => ['session-end --session=probe'],
+        'sessions' => ['sessions'],
+        'hook' => ['hook'],
+        'opencode' => ['opencode'],
+    ]);
+
+    it('keeps every hook verb on the hot path', function () {
+        $bin = (string) file_get_contents(base_path('bin/agent-bus'));
+
+        expect($bin)
+            ->toContain('Cli::HOT_VERBS')
+            ->not->toContain('wrangler')
+            ->not->toContain('DurableObject')
+            ->and(Cli::HOT_VERBS)
+            ->toContain('emit', 'send', 'heartbeat', 'session-end', 'sessions', 'hook', 'opencode');
+    });
 });
 
 /**

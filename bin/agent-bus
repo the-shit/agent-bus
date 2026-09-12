@@ -2,7 +2,44 @@
 <?php
 
 use App\Bus\Cli;
+use Illuminate\Contracts\Console\Kernel;
+use Symfony\Component\Console\Input\ArgvInput;
+use Symfony\Component\Console\Output\ConsoleOutput;
 
-require __DIR__.'/../vendor/autoload.php';
+define('LARAVEL_START', microtime(true));
 
-exit((new Cli)->run($argv));
+/*
+ * Box reads this to find the PHAR entry point, and Laravel Zero uses it in
+ * command help. Without it the framework assumes a root `artisan` file.
+ */
+define('ARTISAN_BINARY', 'bin/agent-bus');
+
+require file_exists(__DIR__.'/../vendor/autoload.php')
+    ? __DIR__.'/../vendor/autoload.php'
+    : __DIR__.'/../../../autoload.php';
+
+/*
+ * Hot path. Hook verbs fire on every tool call, so they run on Composer's
+ * autoloader alone. Nothing below this block may execute for them, and
+ * tests/Feature/AgentBusCliTest.php proves no framework class is loaded.
+ */
+if (in_array($argv[1] ?? '', Cli::HOT_VERBS, true)) {
+    exit((new Cli)->run($argv));
+}
+
+/*
+ * Cold path. provision, sidecar, and the framework's own commands boot
+ * Laravel Zero. This is the process that stays up, not the one hooks spawn.
+ */
+$app = require_once __DIR__.'/../bootstrap/app.php';
+
+$kernel = $app->make(Kernel::class);
+
+$status = $kernel->handle(
+    $input = new ArgvInput,
+    new ConsoleOutput
+);
+
+$kernel->terminate($input, $status);
+
+exit($status);

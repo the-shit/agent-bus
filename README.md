@@ -8,7 +8,7 @@ Coding agents that can't see each other are just expensive tabs. This is the bus
 
 NATS JetStream so Grok Build and OpenCode sessions can discover peers, subscribe to tool calls and idle, and send JSON to a live session — no pasting into someone else's TUI.
 
-Laravel 13. First clients board **this** NATS bus (JetStream `AGENT_BUS` + KV `sessions`). Not Cloudflare Durable Objects.
+Laravel Zero 13 console app. First clients board **this** NATS bus (JetStream `AGENT_BUS` + KV `sessions`). Not Cloudflare Durable Objects.
 
 ## The lie
 
@@ -47,7 +47,8 @@ Two agents on the same machine still work like strangers. You copy a path into c
 
 Stay local: `phase_changed`, permission chatter, MCP connect, token stream, the jsonl file.
 
-Hooks already get `sessionId`, `cwd`, `toolName` on stdin. A tiny `agent-bus emit` CLI publishes. Laravel does not boot on every tool call.
+Hooks already get `sessionId`, `cwd`, `toolName` on stdin. `agent-bus emit`
+publishes. The framework does not boot on every tool call.
 
 - **Send:** MCP/CLI `send` publishes to `session.{id}.inbox`. A host sidecar subscribed to *this* session injects into the target (Herdr `agent prompt` for Grok). Prove: two agents, one send, the other turn starts with the JSON. No paste.
 - **First clients:** Grok Build and OpenCode.
@@ -71,7 +72,7 @@ Hooks already get `sessionId`, `cwd`, `toolName` on stdin. A tiny `agent-bus emi
 ```bash
 docker compose up -d
 # client port 4222, HTTP monitor 8222
-php artisan nats:provision
+bin/agent-bus provision
 ```
 
 That stands JetStream stream `AGENT_BUS` (subjects `repo.>`, `session.>`) and KV bucket `sessions` (history 1, 90s TTL). Running provision twice is a no-op.
@@ -79,8 +80,12 @@ That stands JetStream stream `AGENT_BUS` (subjects `repo.>`, `session.>`) and KV
 Prove with Pest (skips if nothing is listening on 4222 — it does not pretend it published):
 
 ```bash
-php artisan test --compact tests/Feature/NatsBusTest.php
+vendor/bin/pest tests/Feature/NatsBusTest.php
 ```
+
+CI stands a broker up and runs with `AGENT_BUS_REQUIRE_BROKER=1`, which turns
+those skips into failures. A broker that quietly fails to start cannot make the
+suite look green.
 
 Prove with the nats CLI if you have it:
 
@@ -93,7 +98,17 @@ nats kv get sessions demo
 
 ## Emit and send
 
-Hooks call `bin/agent-bus`. Composer autoload only — Laravel does not boot.
+`bin/agent-bus` is one binary with two paths. Hook verbs run on Composer's
+autoloader alone; `provision` and `sidecar` boot Laravel Zero. Measured on this
+checkout, PHP 8.4:
+
+| Path | Verbs | Cost |
+|---|---|---|
+| Hot | `emit` `send` `heartbeat` `session-end` `sessions` `hook` `opencode` | 66 ms |
+| Cold | `provision` `sidecar` `app:build` | 150 ms |
+
+A test runs every hot verb in a subprocess and fails if a single framework class
+gets loaded.
 
 ```bash
 bin/agent-bus emit --type=toolCall --payload='{"tool":"composer"}'
@@ -108,7 +123,10 @@ bin/agent-bus sessions
 bin/agent-bus sessions get 01a08ef9-2515-7460-89bd-5efc21f28642
 ```
 
-Connects to `nats://127.0.0.1:4222`. Override with `NATS_URL`.
+Connects to `nats://127.0.0.1:4222`. Override with `NATS_URL`, credentials
+inline for a remote broker: `nats://user:pass@homelab.tail:4222`. One variable
+drives both paths. Loopback answers fast; raise `AGENT_BUS_CONNECT_TIMEOUT`
+(seconds, default `0.25`) when the broker is across a tailnet.
 
 ```bash
 bin/agent-bus session-end --session 01a08ef9-2515-7460-89bd-5efc21f28642
@@ -133,9 +151,8 @@ Heartbeat PUTs presence JSON (`sessionId`, `agentType`, `repo`, `lastSeen`). `se
 One process per host. It maps Grok session ids from `herdr agent list` (`agent_session.value` → `pane_id`) onto KV `sessions`, then injects inbox JSON with `herdr agent prompt` so the **model** sees it. No paste. No markdown drop. No `wtype`.
 
 ```bash
-php artisan nats:provision
-php artisan agent-bus:sidecar
-# or: bin/agent-bus-sidecar
+bin/agent-bus provision
+bin/agent-bus sidecar
 ```
 
 Leave it running. From another pane (session A):
@@ -149,7 +166,22 @@ Session B's next turn contains that JSON. Restart the sidecar, send again, it st
 Pest proves the map and that the sidecar would prompt that pane (Herdr is faked; NATS tests skip when the broker is down). Live two-Grok prove is the issue, not CI.
 
 ```bash
-php artisan test --compact tests/Feature/AgentBusSidecarTest.php tests/Unit/Bus/SessionPaneMapTest.php
+vendor/bin/pest tests/Feature/AgentBusSidecarTest.php tests/Unit/Bus/SessionPaneMapTest.php
 ```
 
 [Pint and Pest](https://github.com/the-shit/agent-bus/actions/workflows/tests.yml) run on every pull request.
+
+## Compile a binary
+
+```bash
+composer install --no-dev
+php bin/agent-bus app:build agent-bus
+./builds/agent-bus provision
+```
+
+One ~30 MB file, no checkout and no `composer install` on the target machine.
+Good for the sidecar and for running verbs by hand.
+
+**Not for hooks.** PHAR stub overhead puts the hot path at ~206 ms against
+66 ms for the script — roughly 140 ms added to every tool call. Point
+`hooks/grok.json` at `bin/agent-bus` in a checkout and keep hooks cheap.

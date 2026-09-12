@@ -162,19 +162,21 @@ it('ticks by consuming inbox JSON and prompting the mapped pane', function () {
     });
 });
 
-it('fails agent-bus:sidecar when the broker is down', function () {
+it('fails sidecar when the broker is down', function () {
     config(['nats_basis.connections.default.port' => 1]);
 
-    $this->artisan('agent-bus:sidecar', ['--once' => true])->assertFailed();
+    $this->artisan('sidecar', ['--once' => true])->assertFailed();
 });
 
-it('boots Laravel from bin/agent-bus-sidecar', function () {
-    $bin = file_get_contents(base_path('bin/agent-bus-sidecar'));
+it('runs the sidecar off the one binary', function () {
+    $result = Process::path(base_path())
+        ->timeout(10)
+        ->run([PHP_BINARY, base_path('bin/agent-bus'), 'list']);
 
-    expect($bin)
-        ->toContain("require __DIR__.'/../vendor/autoload.php'")
-        ->toContain('bootstrap/app.php')
-        ->toContain('agent-bus:sidecar');
+    expect($result->exitCode())->toBe(0)
+        ->and($result->output())
+        ->toContain('sidecar')
+        ->toContain('provision');
 });
 
 it('consumes an inbox message and would prompt this pane', function () {
@@ -216,14 +218,14 @@ it('consumes an inbox message and would prompt this pane', function () {
     $bus->ensureInboxConsumer();
     $bus->publishEnvelope('session.'.$sessionId.'.inbox', $envelope);
 
-    $this->artisan('agent-bus:sidecar', ['--once' => true])
+    $this->artisan('sidecar', ['--once' => true])
         ->expectsOutputToContain("prompted {$paneId} for session {$sessionId}")
         ->assertSuccessful();
 
     Process::assertRan(function (PendingProcess $process) use ($paneId, $body) {
         return $process->command === ['herdr', 'agent', 'prompt', $paneId, $body];
     });
-})->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
 /**
  * @param  list<array<string, mixed>>  $agents

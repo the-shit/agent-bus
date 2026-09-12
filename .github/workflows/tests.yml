@@ -24,7 +24,7 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
-          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, phar
           coverage: none
 
       - name: Install Composer dependencies
@@ -47,19 +47,56 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
-          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, phar
           coverage: none
 
       - name: Install Composer dependencies
         run: composer install --prefer-dist --no-interaction --no-progress
 
-      - name: Copy environment file
-        run: cp .env.example .env
+      # The bus is the product. Without a broker the suite skips every JetStream
+      # and KV test, so CI stands one up with the same flags as docker-compose.yml.
+      # A service container cannot pass `-js`, so run it directly.
+      - name: Start NATS with JetStream
+        run: |
+          docker run -d --name nats -p 4222:4222 -p 8222:8222 nats:2-alpine -js -m 8222
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8222/healthz > /dev/null && exit 0
+            sleep 1
+          done
+          echo "NATS did not become healthy" >&2
+          docker logs nats >&2
+          exit 1
 
-      - name: Generate app key
-        run: php artisan key:generate
-
-      # NATS-backed tests skip when the broker is absent (skip-when-down).
-      # Do not add a nats service container unless a test requires the broker.
+      # AGENT_BUS_REQUIRE_BROKER turns a skipped NATS test into a failure, so a
+      # broker that quietly fails to start cannot make the suite look green.
       - name: Pest
-        run: php artisan test --compact
+        run: vendor/bin/pest
+        env:
+          AGENT_BUS_REQUIRE_BROKER: '1'
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, phar
+          coverage: none
+          ini-values: phar.readonly=0
+
+      - name: Install Composer dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress --no-dev
+
+      - name: Compile the binary
+        run: php bin/agent-bus app:build agent-bus --build-version="${GITHUB_SHA::7}"
+
+      - name: Prove the binary runs
+        run: ./builds/agent-bus list

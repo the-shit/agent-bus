@@ -10,6 +10,22 @@ use Throwable;
 
 class Cli
 {
+    /**
+     * Verbs that must never boot the framework. Hooks fire these on every tool
+     * call, so bin/agent-bus dispatches them straight to this class.
+     *
+     * @var list<string>
+     */
+    public const HOT_VERBS = [
+        'emit',
+        'send',
+        'heartbeat',
+        'session-end',
+        'sessions',
+        'hook',
+        'opencode',
+    ];
+
     private ?Client $client = null;
 
     /**
@@ -454,24 +470,28 @@ class Cli
 
     private function configuration(): Configuration
     {
-        $url = getenv('NATS_URL');
-        $url = is_string($url) && $url !== '' ? $url : 'nats://127.0.0.1:4222';
-
-        if (! str_contains($url, '://')) {
-            $url = 'nats://'.$url;
-        }
-
-        $parts = parse_url($url) ?: [];
+        $parts = NatsUrl::parse(NatsUrl::fromEnvironment());
 
         return new Configuration(
-            host: is_string($parts['host'] ?? null) ? $parts['host'] : '127.0.0.1',
-            port: isset($parts['port']) ? (int) $parts['port'] : 4222,
-            user: is_string($parts['user'] ?? null) ? $parts['user'] : null,
-            pass: is_string($parts['pass'] ?? null) ? $parts['pass'] : null,
+            host: $parts['host'],
+            port: $parts['port'],
+            user: $parts['user'],
+            pass: $parts['pass'],
             reconnect: false,
-            timeout: 0.25,
+            timeout: $this->connectTimeout(),
             maxReconnectAttempts: 0,
         );
+    }
+
+    /**
+     * Loopback needs milliseconds; a tailnet broker needs room. AGENT_BUS_CONNECT_TIMEOUT overrides.
+     */
+    private function connectTimeout(): float
+    {
+        $raw = getenv('AGENT_BUS_CONNECT_TIMEOUT');
+        $timeout = is_string($raw) ? (float) $raw : 0.0;
+
+        return $timeout > 0 ? $timeout : 0.25;
     }
 
     private function streamName(): string
@@ -545,6 +565,10 @@ Usage:
   bin/agent-bus sessions get <id>
   bin/agent-bus hook
   bin/agent-bus opencode
+
+Cold path (boots the framework):
+  bin/agent-bus provision
+  bin/agent-bus sidecar [--once]
 TXT."\n");
 
         return 1;
