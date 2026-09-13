@@ -257,3 +257,17 @@ function sidecarHerdrAgent(string $sessionId, string $paneId): array
         'pane_id' => $paneId,
     ];
 }
+
+it('reports an unmapped inbox to the transport as a delivery failure', function () {
+    Process::preventStrayProcesses();
+    Process::fake(['*' => Process::result(sidecarHerdrListJson([]))]);
+    $bus = Mockery::mock(NatsBus::class);
+    $bus->shouldReceive('listSessionIds')->once()->andReturn([]);
+    $bus->shouldReceive('consumeInbox')->once()->andReturnUsing(function (callable $handler) {
+        $handler('session.missing.inbox', '{"sessionId":"missing"}');
+    });
+    $this->app->instance(NatsBus::class, $bus);
+
+    expect(fn () => app(Sidecar::class)->tick())->toThrow(RuntimeException::class, 'Recipient unavailable');
+    Process::assertDidntRun(fn (PendingProcess $process) => ($process->command[2] ?? null) === 'prompt');
+});

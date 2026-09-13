@@ -2,6 +2,8 @@
 
 namespace App\Bus;
 
+use RuntimeException;
+
 class Sidecar
 {
     public function __construct(
@@ -65,7 +67,7 @@ class Sidecar
             $paneId = $this->deliver($subject, $body, $panes);
 
             if ($paneId === null) {
-                return;
+                throw new RuntimeException('Recipient unavailable or inbox envelope invalid.');
             }
 
             $sessionId = $this->map->sessionIdFromMessage($subject, $body) ?? '';

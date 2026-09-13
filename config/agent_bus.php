@@ -21,7 +21,8 @@ return [
 
     'sidecar' => [
         'consumer' => env('AGENT_BUS_SIDECAR_CONSUMER'),
-        'batch' => (int) env('AGENT_BUS_SIDECAR_BATCH', 8),
+        'max_attempts' => (int) env('AGENT_BUS_SIDECAR_MAX_ATTEMPTS', 5),
+        'retry_seconds' => (float) env('AGENT_BUS_SIDECAR_RETRY_SECONDS', 5),
         'expires' => (float) env('AGENT_BUS_SIDECAR_EXPIRES', 0.5),
     ],
 
