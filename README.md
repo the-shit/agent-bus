@@ -171,6 +171,26 @@ vendor/bin/pest tests/Feature/AgentBusSidecarTest.php tests/Unit/Bus/SessionPane
 
 [Pint and Pest](https://github.com/the-shit/agent-bus/actions/workflows/tests.yml) run on every pull request.
 
+## MCP server
+
+`bin/agent-bus mcp` speaks MCP JSON-RPC 2.0 over stdin/stdout. Point an MCP
+client at it; do not pipe it yourself.
+
+```bash
+bin/agent-bus mcp
+```
+
+Tools:
+
+- `list_sessions` — read every session from KV `sessions`. Pass `repo` to filter.
+- `get_session` — read one session. Required: `sessionId`.
+- `send` — publish to `session.{sessionId}.inbox`. Required: `sessionId` +
+  `payload` (JSON object). Fails closed when the session is not on the bus.
+
+Errors return `isError: true` in the MCP tool result. Unknown methods and
+malformed requests return JSON-RPC error objects. Nothing is written to stdout
+besides protocol JSON.
+
 ## Compile a binary
 
 ```bash
