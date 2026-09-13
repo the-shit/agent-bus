@@ -246,7 +246,7 @@ class NatsBus
      * Pull one batch of bus envelopes from every subject and hand each to the handler.
      * Invalid payloads are acked (skipped) by the caller returning normally.
      *
-     * @param  callable(string, array<string, mixed>): void  $handler
+     * @param  callable(string, array<string, mixed>, ?int): void  $handler
      */
     public function consumeMonitor(callable $handler, int $iterations = 1): int
     {
@@ -260,11 +260,40 @@ class NatsBus
         $consumer->setBatching(max(1, $batch));
         $consumer->setExpires($expires > 0 ? $expires : 0.5);
 
-        return $consumer->handle(function (Payload $payload) use ($handler): void {
+        return $consumer->handle(function (Payload $payload, ?string $replyTo) use ($handler): void {
             $subject = is_string($payload->subject) ? $payload->subject : '';
             $body = is_string($payload->body) ? $payload->body : '';
-            $handler($subject, $this->decodeEnvelope($body));
+            $handler($subject, $this->decodeEnvelope($body), $this->messageSequence($payload, $replyTo));
         });
+    }
+
+    /**
+     * Resolve the JetStream stream sequence for the delivered message. The Payload
+     * exposes an optional seq passthrough, otherwise the $JS.ACK reply token carries
+     * the stream sequence for both the legacy and domain-qualified ack layouts.
+     */
+    private function messageSequence(Payload $payload, ?string $replyTo): ?int
+    {
+        if (is_numeric($payload->seq)) {
+            return (int) $payload->seq;
+        }
+
+        if ($replyTo === null || ! str_starts_with($replyTo, '$JS.ACK')) {
+            return null;
+        }
+
+        $tokens = explode('.', $replyTo);
+        $index = match (count($tokens)) {
+            9 => 5,
+            12 => 7,
+            default => null,
+        };
+
+        if ($index === null || ! is_numeric($tokens[$index] ?? null)) {
+            return null;
+        }
+
+        return (int) $tokens[$index];
     }
 
     /**
