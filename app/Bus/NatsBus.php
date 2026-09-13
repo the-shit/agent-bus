@@ -129,9 +129,13 @@ class NatsBus
             throw new RuntimeException("No message found on subject {$subject}.");
         }
 
-        $decoded = base64_decode($data, true);
-        $body = $decoded !== false ? $decoded : $data;
-        $envelope = json_decode($body, true);
+        // Data from NATS is base64-encoded
+        $decodedData = base64_decode($data, true);
+        if ($decodedData === false) {
+            throw new RuntimeException("Failed to base64-decode message data on subject {$subject}.");
+        }
+
+        $envelope = json_decode($decodedData, true);
 
         if (! is_array($envelope)) {
             throw new RuntimeException("Last message on {$subject} was not a JSON object.");
@@ -189,6 +193,11 @@ class NatsBus
         }
 
         return 'agent-bus-sidecar-'.$host;
+    }
+
+    public function purgeStream(): void
+    {
+        $this->stream()->purge();
     }
 
     public function ensureInboxConsumer(): void

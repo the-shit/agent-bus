@@ -44,7 +44,10 @@ it('publishes a JSON envelope and reads it back', function () {
     $bus = app(NatsBus::class);
     $bus->provision();
 
-    $subject = 'repo.the-shit.agent-bus.prove';
+    // Purge the stream to ensure clean state
+    $bus->purgeStream();
+
+    $subject = 'repo.the-shit.agent-bus.prove.'.time().'.'.getmypid();
     $envelope = [
         'sessionId' => '01a08ef9-2515-7460-89bd-5efc21f28642',
         'agentType' => 'grok',
