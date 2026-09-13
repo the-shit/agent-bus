@@ -1,0 +1,17 @@
+#!/usr/bin/env php
+<?php
+
+use App\Mcp\Server;
+use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Foundation\Application;
+
+define('LARAVEL_START', microtime(true));
+
+require __DIR__.'/../vendor/autoload.php';
+
+/** @var Application $app */
+$app = require_once __DIR__.'/../bootstrap/app.php';
+
+$app->make(Kernel::class)->bootstrap();
+
+exit($app->make(Server::class)->run());

@@ -153,3 +153,21 @@ php artisan test --compact tests/Feature/AgentBusSidecarTest.php tests/Unit/Bus/
 ```
 
 [Pint and Pest](https://github.com/the-shit/agent-bus/actions/workflows/tests.yml) run on every pull request.
+
+## MCP stdio server
+
+`bin/agent-bus-mcp` is a self-contained JSON-RPC 2.0 stdio server (one JSON object per line) on the live bus. Run it directly or point an agent at it as a stdio MCP command:
+
+```json
+{ "mcpServers": { "agent-bus": { "command": "php", "args": ["/path/to/agent-bus/bin/agent-bus-mcp"] } } }
+```
+
+It serves three tools against KV `sessions` and the inbox subject:
+
+| Tool | Args | Reads/writes |
+|---|---|---|
+| `list_sessions` | optional `repo` | KV `sessions` |
+| `get_session` | `sessionId` | KV get |
+| `send` | `sessionId`, `payload` (object) | publish `session.{id}.inbox` |
+
+`send` checks KV first and fails closed for unknown sessions — nothing is published. Stdout stays protocol-clean; diagnostics go to stderr.
