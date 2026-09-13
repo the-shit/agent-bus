@@ -205,3 +205,25 @@ Good for the sidecar and for running verbs by hand.
 **Not for hooks.** PHAR stub overhead puts the hot path at ~206 ms against
 66 ms for the script — roughly 140 ms added to every tool call. Point
 `hooks/grok.json` at `bin/agent-bus` in a checkout and keep hooks cheap.
+
+### Inbox delivery failures
+
+The sidecar acknowledges an inbox message only after successful Herdr injection,
+or after JetStream stores a terminal failure receipt. Missing recipients,
+invalid envelopes, and injection errors retry with exponential delay (5 seconds
+initially, capped at 60 seconds). `AGENT_BUS_SIDECAR_MAX_ATTEMPTS` defaults to 5;
+`AGENT_BUS_SIDECAR_RETRY_SECONDS` controls the initial delay. Attempt counts live
+in JetStream and survive sidecar restarts.
+
+Exhausted deliveries appear on `repo.agent-bus.delivery.failed`, with the original
+body, subject, stream-sequence message ID, consumer, attempt count, and exception
+class. If storing that receipt fails, the original remains unacknowledged.
+Receipts have the stream's retention policy; no automatic replay or Mattermost
+notification is added. Consumers of these receipts must treat the original body
+as untrusted message content.
+
+Inbox pulls are now one message at a time (the former sidecar batch setting is
+removed), with a 60-second acknowledgement timeout, including existing durable
+consumers. Heartbeat renewal and duplicate injection after a crash between
+prompting and acknowledgement remain separate work. This is at-least-once
+transport delivery, not proof that an agent completed its task.

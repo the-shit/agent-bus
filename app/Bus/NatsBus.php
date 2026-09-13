@@ -5,7 +5,6 @@ namespace App\Bus;
 use Basis\Nats\Consumer\AckPolicy;
 use Basis\Nats\Consumer\DeliverPolicy;
 use Basis\Nats\KeyValue\Bucket;
-use Basis\Nats\Message\Payload;
 use Basis\Nats\Stream\Stream;
 use JsonException;
 use LaravelNats\Laravel\NatsV2Gateway;
@@ -199,13 +198,17 @@ class NatsBus
             $consumer->getConfiguration()
                 ->setSubjectFilter('session.*.inbox')
                 ->setDeliverPolicy(DeliverPolicy::NEW)
-                ->setAckPolicy(AckPolicy::EXPLICIT);
+                ->setAckPolicy(AckPolicy::EXPLICIT)
+                ->setAckWait(60_000_000_000);
             $consumer->create();
+        } elseif ($consumer->getConfiguration()->getAckWait() !== 60_000_000_000) {
+            $consumer->getConfiguration()->setAckWait(60_000_000_000);
+            $consumer->create(false);
         }
     }
 
     /**
-     * Pull one inbox batch. Unknown sessions are acked (dropped) by the caller returning normally.
+     * Pull one inbox batch. Failures are retried or recorded before acknowledgement.
      *
      * @param  callable(string, string): void  $handler
      */
@@ -213,18 +216,30 @@ class NatsBus
     {
         $this->ensureInboxConsumer();
 
-        $batch = (int) config('agent_bus.sidecar.batch', 8);
         $expires = (float) config('agent_bus.sidecar.expires', 0.5);
 
         $consumer = $this->stream()->getConsumer($this->sidecarConsumerName());
-        $consumer->setIterations(max(1, $iterations));
-        $consumer->setBatching(max(1, $batch));
+        $consumer->setBatching(1);
         $consumer->setExpires($expires > 0 ? $expires : 0.5);
 
-        return $consumer->handle(function (Payload $payload) use ($handler): void {
-            $subject = is_string($payload->subject) ? $payload->subject : '';
-            $handler($subject, $payload->body);
-        });
+        $processed = 0;
+        $delivery = new InboxDelivery($this);
+        for ($iteration = 0; $iteration < max(1, $iterations); $iteration++) {
+            // Fetch one at a time: a slow prompt must not age other messages' leases.
+            $queue = $consumer->getQueue();
+            try {
+                foreach ($queue->fetchAll(1) as $message) {
+                    if (! $message->payload->isEmpty()) {
+                        $delivery->handle($message, $handler);
+                        $processed++;
+                    }
+                }
+            } finally {
+                $consumer->client->unsubscribe($queue);
+            }
+        }
+
+        return $processed;
     }
 
     private function stream(): Stream
