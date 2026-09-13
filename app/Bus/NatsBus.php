@@ -129,11 +129,9 @@ class NatsBus
             throw new RuntimeException("No message found on subject {$subject}.");
         }
 
-        $decoded = base64_decode($data, true);
-        $body = $decoded !== false ? $decoded : $data;
-        $envelope = json_decode($body, true);
+        $envelope = $this->decodeEnvelope($data);
 
-        if (! is_array($envelope)) {
+        if ($envelope === []) {
             throw new RuntimeException("Last message on {$subject} was not a JSON object.");
         }
 
@@ -181,14 +179,7 @@ class NatsBus
             return $configured;
         }
 
-        $host = preg_replace('/[^A-Za-z0-9_-]+/', '-', gethostname() ?: 'host') ?? 'host';
-        $host = trim($host, '-');
-
-        if ($host === '') {
-            $host = 'host';
-        }
-
-        return 'agent-bus-sidecar-'.$host;
+        return $this->hostScopedConsumerName('agent-bus-sidecar');
     }
 
     public function ensureInboxConsumer(): void
@@ -225,6 +216,79 @@ class NatsBus
             $subject = is_string($payload->subject) ? $payload->subject : '';
             $handler($subject, $payload->body);
         });
+    }
+
+    public function monitorConsumerName(): string
+    {
+        $configured = config('agent_bus.monitor.consumer');
+
+        if (is_string($configured) && $configured !== '') {
+            return $configured;
+        }
+
+        return $this->hostScopedConsumerName('agent-bus-monitor');
+    }
+
+    public function ensureMonitorConsumer(): void
+    {
+        $consumer = $this->stream()->getConsumer($this->monitorConsumerName());
+
+        if (! $consumer->exists()) {
+            $consumer->getConfiguration()
+                ->setSubjectFilters($this->subjects())
+                ->setDeliverPolicy(DeliverPolicy::ALL)
+                ->setAckPolicy(AckPolicy::EXPLICIT);
+            $consumer->create();
+        }
+    }
+
+    /**
+     * Pull one batch of bus envelopes from every subject and hand each to the handler.
+     * Invalid payloads are acked (skipped) by the caller returning normally.
+     *
+     * @param  callable(string, array<string, mixed>): void  $handler
+     */
+    public function consumeMonitor(callable $handler, int $iterations = 1): int
+    {
+        $this->ensureMonitorConsumer();
+
+        $batch = (int) config('agent_bus.monitor.batch', 8);
+        $expires = (float) config('agent_bus.monitor.expires', 0.5);
+
+        $consumer = $this->stream()->getConsumer($this->monitorConsumerName());
+        $consumer->setIterations(max(1, $iterations));
+        $consumer->setBatching(max(1, $batch));
+        $consumer->setExpires($expires > 0 ? $expires : 0.5);
+
+        return $consumer->handle(function (Payload $payload) use ($handler): void {
+            $subject = is_string($payload->subject) ? $payload->subject : '';
+            $body = is_string($payload->body) ? $payload->body : '';
+            $handler($subject, $this->decodeEnvelope($body));
+        });
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function decodeEnvelope(string $body): array
+    {
+        $decoded = base64_decode($body, true);
+        $payload = $decoded !== false ? $decoded : $body;
+        $envelope = json_decode($payload, true);
+
+        return is_array($envelope) ? $envelope : [];
+    }
+
+    private function hostScopedConsumerName(string $prefix): string
+    {
+        $host = preg_replace('/[^A-Za-z0-9_-]+/', '-', gethostname() ?: 'host') ?? 'host';
+        $host = trim($host, '-');
+
+        if ($host === '') {
+            $host = 'host';
+        }
+
+        return $prefix.'-'.$host;
     }
 
     private function stream(): Stream
