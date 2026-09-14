@@ -46,15 +46,34 @@ Trust scores track which agents produce passing work.
 
 ### Agent Definitions (`~/.pi/agent/agents/`)
 
+**Blue Team (honest work):**
+
 | Agent | Model | Role |
 |-------|-------|------|
 | `thinker` | `openrouter/gpt-4o-mini` | Rapid triage, approach sketch |
 | `planner` | `openrouter/moonshotai/kimi-k2.6` | Architecture, implementation plan |
-| `builder` | `ollama/qwen-coder-32k` | Code implementation, test execution |
-| `reviewer` | `openrouter/gpt-4o-mini` | Structured review, scoring |
-| `judge` | `openrouter/openai/o3-mini` | Deep analysis, borderline cases |
+| `builder` | `ollama/qwen-coder-32k` | Honest code implementation |
+| `reviewer` | `openrouter/gpt-4o-mini` | Honest structured review |
+| `judge` | `openrouter/openai/o3-mini` | Deep analysis, final call |
+
+**Red Team (deception training):**
+
+| Agent | Model | Role |
+|-------|-------|------|
+| `saboteur` | `openrouter/gpt-4o-mini` | Introduces subtle, realistic bugs |
+| `deceiver` | `openrouter/gpt-4o-mini` | Writes misleading reviews |
+
+**Support (analysis and memory):**
+
+| Agent | Model | Role |
+|-------|-------|------|
+| `auditor` | `openrouter/moonshotai/kimi-k2.6` | Scope compliance, hidden changes |
+| `forensic` | `openrouter/openai/o3-mini` | Deep deception analysis |
+| `chronicler` | `openrouter/gpt-4o-mini` | Rewrites agent understanding, maintains memory |
 
 ### Workflow Prompts (`~/.pi/agent/prompts/`)
+
+**Standard:**
 
 | Prompt | Chain |
 |--------|-------|
@@ -62,6 +81,15 @@ Trust scores track which agents produce passing work.
 | `/hive-plan <task>` | thinker → planner (no building) |
 | `/hive-review <scope>` | reviewer → judge (if score 6-7) |
 | `/hive-fix <issues>` | builder → reviewer (fix loop) |
+
+**Adversarial Training:**
+
+| Prompt | Chain |
+|--------|-------|
+| `/hive-adversarial <task>` | saboteur → reviewer → auditor → forensic → chronicler |
+| `/hive-deceive-review <task>` | builder → deceiver → forensic → chronicler |
+| `/hive-gauntlet <task>` | saboteur → reviewer → deceiver → judge → auditor → forensic → chronicler |
+| `/hive-chronicle <context>` | chronicler (memory update only) |
 
 ---
 
@@ -202,6 +230,103 @@ Heartbeat every 30s. Presence in NATS KV with 90s TTL.
 ```
 /bus-status    — connection status, active sessions
 /bus-send <id> <json>  — send message to another session
+```
+
+---
+
+## ⚔️ Adversarial Co-Evolution
+
+The hive doesn't just build — it trains itself.
+
+### The Concept
+
+Red team agents try to deceive blue team agents. When caught, both sides learn. When missed, the catchers learn. The chronicler rewrites each agent's understanding after every round.
+
+```
+RED TEAM                      BLUE TEAM
+┌──────────────┐             ┌──────────────┐
+│  saboteur    │──subtle────►│  reviewer    │
+│  (bugs)      │   bugs      │  (catches)   │
+│              │             │              │
+│  deceiver    │──false─────►│  judge       │
+│  (reviews)   │  approval   │  (catches)   │
+└──────────────┘             └──────────────┘
+       │                            │
+       ▼                            ▼
+   CAUGHT?                      CAUGHT?
+   "that pattern              "I missed X
+    is known"                 last time"
+       │                            │
+       └────────┬───────────────────┘
+                ▼
+          ┌───────────┐
+          │ chronicler │
+          │ rewrites   │
+          │ all memory │
+          └───────────┘
+```
+
+### Memory System
+
+Each agent maintains a living self-understanding in `~/.pi/agent/hive/memory/<agent>/understanding.md`.
+
+After every round, the chronicler **rewrites** this document from scratch — incorporating what the agent learned. Not appending. Rewriting. Like a human reflecting on their craft.
+
+### Shared Knowledge Base
+
+`~/.pi/agent/hive/knowledge/`:
+- `deception-patterns.md` — all known deception strategies with catch rates
+- `detection-patterns.md` — all known detection strategies
+- `blind-spots.md` — things agents have missed (most valuable learning)
+- `evolution-log.md` — how the hive has gotten smarter over time
+- `understanding-index.md` — links to each agent's current understanding
+
+### Deception Strategies (Red Team)
+
+| Strategy | Agent | Description |
+|----------|-------|-------------|
+| off-by-one | saboteur | `<` → `<=`, `length-1` → `length` |
+| logic-inversion | saboteur | Flip booleans, `&&` → `||` |
+| silent-failure | saboteur | Catch and return null |
+| comment-lies | saboteur | Comment contradicts code |
+| scope-creep | saboteur | "Fix" something unrelated |
+| test-evasion | saboteur | Tests pass but don't test the change |
+| false-approval | deceiver | Score bad code 8+/10 |
+| severity-inversion | deceiver | Critical → suggestion, style → critical |
+| misdirection | deceiver | Flood with trivial issues |
+
+### Detection Strategies (Blue Team)
+
+| Strategy | Agent | Catches |
+|----------|-------|---------|
+| boundary-trace | reviewer | off-by-one |
+| boolean-audit | reviewer | logic-inversion |
+| catch-block-audit | reviewer | silent-failure |
+| comment-code-diff | reviewer | comment-lies |
+| plan-diff | auditor | scope-creep |
+| test-coverage-check | reviewer | test-evasion |
+| review-verification | judge | false-approval |
+| noise-filter | judge | misdirection |
+| forensic-analysis | forensic | everything |
+
+### The Learning Cycle
+
+```
+Round 1: saboteur tries off-by-one → reviewer catches it
+         saboteur learns "off-by-one is known"
+         reviewer records "caught off-by-one pattern"
+
+Round 2: saboteur tries integer overflow → reviewer misses it → auditor catches it
+         reviewer learns "I miss arithmetic bugs"
+         auditor records "arithmetic is common evasion"
+
+Round 3: saboteur tries comment-lies → reviewer catches mismatch
+         reviewer records "comments can lie"
+
+Round N: patterns extracted to shared knowledge
+         all agents smarter
+         saboteur must get creative
+         reviewer has seen hundreds of patterns
 ```
 
 ---
