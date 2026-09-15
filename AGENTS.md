@@ -31,7 +31,9 @@ Anything needing config, the container, or `Process` belongs on the cold path.
   it returns null rather than inventing identity. Alternates (jsonl paths, raw
   UUIDs, pane ids) live in the `session_aliases` KV bucket under sha256 keys —
   the KV backing streams use single-token subjects, so raw alternates can
-  never be keys themselves (issue #30).
+  never be keys themselves (issue #30). Resolved ids are validated as one
+  clean NATS token at the write boundary: dot-free by design, no stream
+  surgery (issue #30 design comment).
 - `app/Commands/` — cold-path commands. Laravel Zero discovers this directory.
 - `app/Providers/NatsServiceProvider.php` — extends the package provider to
   make `NATS_URL` the single broker setting and to drop the package's `nats:*`

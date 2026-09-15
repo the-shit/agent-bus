@@ -96,6 +96,7 @@ class Cli
         $envelope = $this->envelope($options, requireSession: false);
         $this->requireAgentType($envelope);
         [$envelope['sessionId'], $aliases] = $this->canonicalize($envelope['sessionId'], $envelope['agentType']);
+        $this->requireSubjectSafe($envelope['sessionId']);
 
         try {
             $this->registerPresence($envelope);
@@ -121,6 +122,22 @@ class Cli
     {
         if ($envelope['agentType'] === '') {
             throw new InvalidArgumentException('Missing --agent-type (or AGENT_BUS_AGENT_TYPE); envelope v2 requires agentType.');
+        }
+    }
+
+    /**
+     * Canonical ids are dot-free by design (issue #30): the KV backing
+     * streams and the sidecar inbox filter are single-token, so a dotted id
+     * can neither persist nor receive. Alternates are free-form — they reach
+     * the bus only as hashed alias keys — but a resolved id that is not one
+     * clean NATS token is a caller bug and dies loudly here.
+     */
+    private function requireSubjectSafe(string $sessionId): void
+    {
+        if ($sessionId !== '' && preg_match('/^[^\s.*>]+$/', $sessionId) !== 1) {
+            throw new InvalidArgumentException(
+                "session id [{$sessionId}] is not a single NATS token (dots, wildcards, whitespace) — see issue #30."
+            );
         }
     }
 
@@ -285,6 +302,8 @@ class Cli
                 return 1;
             }
 
+            $this->requireSubjectSafe($resolved);
+
             $envelope = $this->envelope([
                 ...$options,
                 'session' => $resolved,
@@ -314,6 +333,7 @@ class Cli
         $sessionId = $this->sessionId($options, required: true);
         $agentType = $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE');
         [$canonical, $aliases] = $this->canonicalize($sessionId, $agentType);
+        $this->requireSubjectSafe($canonical);
 
         try {
             $presence = $this->explicitPresence($canonical, $agentType, $this->option($options, 'model', 'AGENT_BUS_MODEL'));
@@ -447,7 +467,9 @@ class Cli
         [$canonical] = $this->canonicalize($sessionId, $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'));
 
         try {
-            $this->deleteSession($this->resolveOnBus($canonical) ?? $canonical);
+            $resolved = $this->resolveOnBus($canonical) ?? $canonical;
+            $this->requireSubjectSafe($resolved);
+            $this->deleteSession($resolved);
         } catch (Throwable $exception) {
             fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
 
@@ -530,6 +552,7 @@ class Cli
     {
         $envelope = $this->envelope($options, requireSession: false);
         $this->requireAgentType($envelope);
+        $this->requireSubjectSafe($envelope['sessionId']);
         $this->registerPresence($envelope);
         $this->publish($this->repoSubject($envelope), $envelope);
     }
