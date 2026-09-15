@@ -21,9 +21,19 @@ describe('emit', function () {
             ->and($result->errorOutput())->toContain('Missing --type.');
     });
 
-    it('exits 0 with one stderr line when the broker is down', function () {
+    it('exits 1 when --agent-type is missing (envelope v2 requires it)', function () {
         $result = agentBusCli(
             ['emit', '--type=toolCall', '--payload={"tool":"composer"}', '--session=cli-emit'],
+            ['NATS_URL' => 'nats://127.0.0.1:1'],
+        );
+
+        expect($result->exitCode())->toBe(1)
+            ->and($result->errorOutput())->toContain('envelope v2 requires agentType');
+    });
+
+    it('exits 0 with one stderr line when the broker is down', function () {
+        $result = agentBusCli(
+            ['emit', '--type=toolCall', '--payload={"tool":"composer"}', '--session=cli-emit', '--agent-type=probe'],
             ['NATS_URL' => 'nats://127.0.0.1:1'],
         );
 
@@ -57,8 +67,9 @@ describe('emit', function () {
         $subject = 'repo.the-shit.agent-bus.'.$type;
 
         expect($printed)
-            ->toHaveKeys(['sessionId', 'agentType', 'model', 'repo', 'type', 'timestamp', 'payload'])
-            ->and($printed['sessionId'])->toBe('01a08ef9-2515-7460-89bd-5efc21f28642')
+            ->toHaveKeys(['v', 'sessionId', 'agentType', 'model', 'repo', 'type', 'timestamp', 'payload'])
+            ->and($printed['v'])->toBe(2)
+            ->and($printed['sessionId'])->toBe('grok:01a08ef9-2515-7460-89bd-5efc21f28642')
             ->and($printed['agentType'])->toBe('grok')
             ->and($printed['model'])->toBe('grok-4.6')
             ->and($printed['repo'])->toBe('the-shit/agent-bus')
@@ -231,9 +242,10 @@ describe('hook capture', function () {
         $envelope = $bus->lastEnvelope('repo.the-shit.agent-bus.toolCall');
 
         expect($envelope)
-            ->toHaveKeys(['sessionId', 'agentType', 'repo', 'type', 'timestamp', 'payload'])
+            ->toHaveKeys(['v', 'sessionId', 'agentType', 'repo', 'type', 'timestamp', 'payload'])
+            ->and($envelope['v'])->toBe(2)
             ->and($envelope['type'])->toBe('toolCall')
-            ->and($envelope['sessionId'])->toBe('01a08ef9-2515-7460-89bd-5efc21f28642')
+            ->and($envelope['sessionId'])->toBe('grok:01a08ef9-2515-7460-89bd-5efc21f28642')
             ->and($envelope['agentType'])->toBe('grok')
             ->and($envelope['payload']['tool'])->toBe('run_terminal_command');
     })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
@@ -303,7 +315,7 @@ describe('opencode capture', function () {
 
         expect($envelope['type'])->toBe('toolCall')
             ->and($envelope['agentType'])->toBe('opencode')
-            ->and($envelope['sessionId'])->toBe('oc-session-1')
+            ->and($envelope['sessionId'])->toBe('opencode:ses_testsession0001')
             ->and($envelope['payload']['tool'])->toBe('run_terminal_command');
     })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
@@ -325,6 +337,97 @@ describe('session-end', function () {
 
         $after = json_decode(agentBusCli(['sessions'])->output(), true);
         expect($after)->not->toContain($sessionId);
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+});
+
+describe('identity normalization', function () {
+    it('auto-registers implicit presence on first emit and upgrades on sessionStart', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $uuid = '9f8e7d6c-5b4a-4321-8f0e-1d2c3b4a5967';
+        $canonical = 'grok:'.$uuid;
+        $bus->deleteSession($canonical);
+
+        $result = agentBusCli([
+            'emit',
+            '--type=toolCall',
+            '--session='.$uuid,
+            '--agent-type=grok',
+            '--payload={"tool":"composer"}',
+        ]);
+
+        expect($result->exitCode())->toBe(0)
+            ->and(json_decode($result->output(), true)['sessionId'])->toBe($canonical);
+
+        $implicit = json_decode((string) $bus->getSession($canonical), true);
+
+        expect($implicit['registered'])->toBe('implicit')
+            ->and($implicit['agentType'])->toBe('grok')
+            ->and($implicit['identity_quality'])->toBe('session')
+            ->and($implicit['firstSeen'])->toBe($implicit['lastSeen']);
+
+        agentBusCli([
+            'emit',
+            '--type=sessionStart',
+            '--session='.$uuid,
+            '--agent-type=grok',
+        ]);
+
+        $explicit = json_decode((string) $bus->getSession($canonical), true);
+
+        expect($explicit['registered'])->toBe('explicit')
+            ->and($explicit['firstSeen'])->toBe($implicit['firstSeen']);
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+    it('resolves sessions get and send through the alias map', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $uuid = '7c1d2e3f-4050-4a5b-8c6d-7e8f9a0b1c2d';
+        $path = '/home/jordan/.pi/agent/sessions/--proj--/2026-09-13T05-36-19-422Z_'.$uuid.'.jsonl';
+        $canonical = 'pi:'.$uuid;
+        $bus->deleteSession($canonical);
+
+        // Herdr reports the jsonl path; the bus converges it onto pi:{uuid}.
+        $emit = agentBusCli([
+            'emit',
+            '--type=toolCall',
+            '--session='.$path,
+            '--agent-type=pi',
+            '--payload={"tool":"read"}',
+        ]);
+
+        expect($emit->exitCode())->toBe(0)
+            ->and(json_decode($emit->output(), true)['sessionId'])->toBe($canonical);
+
+        // sessions get resolves the jsonl-path alias onto the canonical record.
+        $get = agentBusCli(['sessions', 'get', $path]);
+
+        expect($get->exitCode())->toBe(0)
+            ->and(json_decode($get->output(), true)['sessionId'])->toBe($canonical);
+
+        // send to the alias lands in the canonical session's inbox.
+        $send = agentBusCli([
+            'send',
+            '--session='.$path,
+            '--payload={"text":"ping"}',
+        ]);
+
+        expect($send->exitCode())->toBe(0)
+            ->and(json_decode($send->output(), true)['sessionId'])->toBe($canonical)
+            ->and($bus->lastEnvelope('session.'.$canonical.'.inbox')['payload'])->toBe(['text' => 'ping']);
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+    it('fails closed when neither the id nor any alias of it is on the bus', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $ghost = '/tmp/nowhere/2026-09-13T00-00-00-000Z_'.bin2hex(random_bytes(2)).'0000-0000-4000-8000-000000000000.jsonl';
+        $result = agentBusCli(['send', '--session='.$ghost, '--payload={"text":"ping"}']);
+
+        expect($result->exitCode())->toBe(1)
+            ->and($result->errorOutput())->toContain('is not on the bus');
     })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
 

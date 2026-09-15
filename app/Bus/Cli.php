@@ -94,8 +94,12 @@ class Cli
     private function emit(array $options): int
     {
         $envelope = $this->envelope($options, requireSession: false);
+        $this->requireAgentType($envelope);
+        [$envelope['sessionId'], $aliases] = $this->canonicalize($envelope['sessionId'], $envelope['agentType']);
 
         try {
+            $this->registerPresence($envelope);
+            $this->putAliases($aliases, $envelope['sessionId']);
             $this->publish($this->repoSubject($envelope), $envelope);
         } catch (Throwable $exception) {
             fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
@@ -109,26 +113,186 @@ class Cli
     }
 
     /**
+     * Envelope v2: presence-bearing events must say who they are.
+     *
+     * @param  array{agentType: string}  $envelope
+     */
+    private function requireAgentType(array $envelope): void
+    {
+        if ($envelope['agentType'] === '') {
+            throw new InvalidArgumentException('Missing --agent-type (or AGENT_BUS_AGENT_TYPE); envelope v2 requires agentType.');
+        }
+    }
+
+    /**
+     * Normalize a reporter-supplied id onto the canonical `{kind}:{id}` form.
+     * Explicit operator input that the resolver cannot place is kept verbatim.
+     *
+     * @return array{0: string, 1: list<string>}
+     */
+    private function canonicalize(string $sessionId, string $agentType): array
+    {
+        if ($sessionId === '' || BusIdentity::isCanonical($sessionId)) {
+            return [$sessionId, []];
+        }
+
+        $resolved = $agentType !== ''
+            ? BusIdentity::resolve($agentType, ['sessionId' => $sessionId])
+            : null;
+
+        if ($resolved === null) {
+            return [$sessionId, []];
+        }
+
+        return [$resolved, [$sessionId]];
+    }
+
+    /**
+     * Auto-register presence for unknown ids before the first publish.
+     * Implicit records are visibly marked; sessionStart upgrades to explicit.
+     *
+     * @param  array{sessionId: string, agentType: string, model: string, repo: string, type: string}  $envelope
+     */
+    private function registerPresence(array $envelope): void
+    {
+        if ($envelope['sessionId'] === '') {
+            return;
+        }
+
+        $now = gmdate('Y-m-d\TH:i:s\Z');
+        $explicit = $envelope['type'] === 'sessionStart';
+        $existing = $this->session($envelope['sessionId']);
+        $record = null;
+
+        if (is_string($existing) && $existing !== '') {
+            $decoded = json_decode($existing, true);
+            $record = is_array($decoded) ? $decoded : null;
+        }
+
+        if ($record !== null) {
+            // v1 records carry no registered marker; treat them as explicit.
+            $registered = $record['registered'] ?? null;
+            $registered = is_string($registered) ? $registered : 'explicit';
+
+            if ($registered === 'explicit') {
+                return; // explicit presence is managed by heartbeat/sessionStart
+            }
+
+            $record['lastSeen'] = $now;
+
+            if ($explicit) {
+                $record['registered'] = 'explicit';
+            }
+
+            $this->putSession($envelope['sessionId'], json_encode($record, JSON_THROW_ON_ERROR));
+
+            return;
+        }
+
+        $this->putSession($envelope['sessionId'], json_encode([
+            'v' => 2,
+            'sessionId' => $envelope['sessionId'],
+            'agentType' => $envelope['agentType'],
+            'model' => $envelope['model'],
+            'host' => gethostname() ?: '',
+            'repo' => $envelope['repo'],
+            'registered' => $explicit ? 'explicit' : 'implicit',
+            'identity_quality' => BusIdentity::quality($envelope['sessionId']),
+            'firstSeen' => $now,
+            'lastSeen' => $now,
+        ], JSON_THROW_ON_ERROR));
+    }
+
+    /**
+     * @param  list<string>  $aliases
+     */
+    private function putAliases(array $aliases, string $canonicalId): void
+    {
+        if ($aliases === [] || $canonicalId === '') {
+            return;
+        }
+
+        $bucket = $this->client()->getApi()->getBucket($this->aliasBucketName());
+        $now = gmdate('Y-m-d\TH:i:s\Z');
+
+        foreach ($aliases as $alias) {
+            $bucket->put($this->aliasKey($alias), json_encode([
+                'alternate' => $alias,
+                'canonical' => $canonicalId,
+                'createdAt' => $now,
+            ], JSON_THROW_ON_ERROR));
+        }
+    }
+
+    /**
+     * Canonical id whose presence is on the bus, resolving through the alias
+     * map. Null when neither the id nor any alias of it is registered.
+     */
+    private function resolveOnBus(string $id): ?string
+    {
+        if ($this->session($id) !== null) {
+            return $id;
+        }
+
+        $canonical = $this->aliasTarget($id);
+
+        if ($canonical !== null && $this->session($canonical) !== null) {
+            return $canonical;
+        }
+
+        return null;
+    }
+
+    private function aliasTarget(string $id): ?string
+    {
+        $value = $this->client()->getApi()->getBucket($this->aliasBucketName())->get($this->aliasKey($id));
+
+        if (! is_string($value) || $value === '') {
+            return null;
+        }
+
+        $decoded = json_decode($value, true);
+        $canonical = is_array($decoded) ? ($decoded['canonical'] ?? null) : null;
+
+        return is_string($canonical) && $canonical !== '' ? $canonical : null;
+    }
+
+    /**
+     * Alternate ids contain dots and slashes that the KV backing stream's
+     * single-token subject cannot hold (issue #30, bug a) — hash the key.
+     */
+    private function aliasKey(string $alternate): string
+    {
+        return hash('sha256', $alternate);
+    }
+
+    /**
      * @param  array<string, string>  $options
      */
     private function send(array $options): int
     {
         $sessionId = $this->sessionId($options, required: true);
         $payload = $this->jsonObject($options['payload'] ?? '', 'payload');
-        $envelope = $this->envelope([
-            ...$options,
-            'type' => $options['type'] ?? 'inbox',
-            'payload' => json_encode($payload, JSON_THROW_ON_ERROR),
-        ], requireSession: true);
+        $agentType = $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE');
+        [$canonical] = $this->canonicalize($sessionId, $agentType);
 
         try {
-            if ($this->session($sessionId) === null) {
+            $resolved = $this->resolveOnBus($canonical);
+
+            if ($resolved === null) {
                 fwrite(STDERR, "session {$sessionId} is not on the bus\n");
 
                 return 1;
             }
 
-            $this->publish('session.'.$sessionId.'.inbox', $envelope);
+            $envelope = $this->envelope([
+                ...$options,
+                'session' => $resolved,
+                'type' => $options['type'] ?? 'inbox',
+                'payload' => json_encode($payload, JSON_THROW_ON_ERROR),
+            ], requireSession: true);
+
+            $this->publish('session.'.$resolved.'.inbox', $envelope);
         } catch (InvalidArgumentException $exception) {
             throw $exception;
         } catch (Throwable $exception) {
@@ -148,18 +312,13 @@ class Cli
     private function heartbeat(array $options): int
     {
         $sessionId = $this->sessionId($options, required: true);
-        $now = gmdate('Y-m-d\TH:i:s\Z');
-        $presence = [
-            'sessionId' => $sessionId,
-            'agentType' => $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'),
-            'model' => $this->option($options, 'model', 'AGENT_BUS_MODEL'),
-            'repo' => $this->repo(),
-            'timestamp' => $now,
-            'lastSeen' => $now,
-        ];
+        $agentType = $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE');
+        [$canonical, $aliases] = $this->canonicalize($sessionId, $agentType);
 
         try {
-            $this->putSession($sessionId, json_encode($presence, JSON_THROW_ON_ERROR));
+            $presence = $this->explicitPresence($canonical, $agentType, $this->option($options, 'model', 'AGENT_BUS_MODEL'));
+            $this->putSession($canonical, json_encode($presence, JSON_THROW_ON_ERROR));
+            $this->putAliases($aliases, $canonical);
         } catch (Throwable $exception) {
             fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
 
@@ -169,6 +328,36 @@ class Cli
         echo json_encode($presence, JSON_THROW_ON_ERROR)."\n";
 
         return 0;
+    }
+
+    /**
+     * @return array<string, string|int>
+     */
+    private function explicitPresence(string $sessionId, string $agentType, string $model): array
+    {
+        $now = gmdate('Y-m-d\TH:i:s\Z');
+        $firstSeen = $now;
+        $existing = $this->session($sessionId);
+
+        if (is_string($existing) && $existing !== '') {
+            $record = json_decode($existing, true);
+            $seen = is_array($record) ? ($record['firstSeen'] ?? null) : null;
+            $firstSeen = is_string($seen) && $seen !== '' ? $seen : $now;
+        }
+
+        return [
+            'v' => 2,
+            'sessionId' => $sessionId,
+            'agentType' => $agentType,
+            'model' => $model,
+            'host' => gethostname() ?: '',
+            'repo' => $this->repo(),
+            'registered' => 'explicit',
+            'identity_quality' => BusIdentity::quality($sessionId),
+            'timestamp' => $now,
+            'firstSeen' => $firstSeen,
+            'lastSeen' => $now,
+        ];
     }
 
     /**
@@ -214,15 +403,15 @@ class Cli
             throw new InvalidArgumentException('Missing session id.');
         }
 
-        $value = $this->session($id);
+        $resolved = $this->resolveOnBus($id);
 
-        if ($value === null) {
+        if ($resolved === null) {
             fwrite(STDERR, "session {$id} is not on the bus\n");
 
             return 1;
         }
 
-        echo $value."\n";
+        echo $this->session($resolved)."\n";
 
         return 0;
     }
@@ -255,9 +444,10 @@ class Cli
     private function sessionEnd(array $options): int
     {
         $sessionId = $this->sessionId($options, required: true);
+        [$canonical] = $this->canonicalize($sessionId, $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'));
 
         try {
-            $this->deleteSession($sessionId);
+            $this->deleteSession($this->resolveOnBus($canonical) ?? $canonical);
         } catch (Throwable $exception) {
             fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
 
@@ -324,6 +514,10 @@ class Cli
                 'sessionEnd' => $this->deleteSession($action->sessionId),
                 default => null,
             };
+
+            if ($action->verb !== 'sessionEnd') {
+                $this->putAliases($action->aliases, $action->sessionId);
+            }
         } catch (Throwable $exception) {
             fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
         }
@@ -335,6 +529,8 @@ class Cli
     private function publishQuiet(array $options): void
     {
         $envelope = $this->envelope($options, requireSession: false);
+        $this->requireAgentType($envelope);
+        $this->registerPresence($envelope);
         $this->publish($this->repoSubject($envelope), $envelope);
     }
 
@@ -344,22 +540,18 @@ class Cli
     private function heartbeatQuiet(array $options): void
     {
         $sessionId = $this->sessionId($options, required: true);
-        $now = gmdate('Y-m-d\TH:i:s\Z');
-        $presence = [
-            'sessionId' => $sessionId,
-            'agentType' => $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'),
-            'model' => $this->option($options, 'model', 'AGENT_BUS_MODEL'),
-            'repo' => $this->repo(),
-            'timestamp' => $now,
-            'lastSeen' => $now,
-        ];
+        $presence = $this->explicitPresence(
+            $sessionId,
+            $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'),
+            $this->option($options, 'model', 'AGENT_BUS_MODEL'),
+        );
 
         $this->putSession($sessionId, json_encode($presence, JSON_THROW_ON_ERROR));
     }
 
     /**
      * @param  array<string, string>  $options
-     * @return array{sessionId: string, agentType: string, model: string, repo: string, type: string, timestamp: string, payload: array<string, mixed>}
+     * @return array{v: int, sessionId: string, agentType: string, model: string, repo: string, type: string, timestamp: string, payload: array<string, mixed>}
      */
     private function envelope(array $options, bool $requireSession): array
     {
@@ -375,6 +567,7 @@ class Cli
         }
 
         return [
+            'v' => 2,
             'sessionId' => $this->sessionId($options, $requireSession),
             'agentType' => $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'),
             'model' => $this->option($options, 'model', 'AGENT_BUS_MODEL'),
@@ -465,7 +658,19 @@ class Cli
 
     private function client(): Client
     {
-        return $this->client ??= new Client($this->configuration());
+        if ($this->client === null) {
+            $client = new Client($this->configuration());
+
+            // basis-nats has one timeout knob for connect AND request
+            // dispatch. Connect inside the tight fail-open budget, then give
+            // JetStream round trips (KV get/put acks) room — issue #30, bug c.
+            $client->ping();
+            $client->configuration->timeout = $this->dispatchTimeout();
+
+            $this->client = $client;
+        }
+
+        return $this->client;
     }
 
     private function configuration(): Configuration
@@ -494,6 +699,17 @@ class Cli
         return $timeout > 0 ? $timeout : 0.25;
     }
 
+    /**
+     * Request/response budget after the connection is up. AGENT_BUS_DISPATCH_TIMEOUT overrides.
+     */
+    private function dispatchTimeout(): float
+    {
+        $raw = getenv('AGENT_BUS_DISPATCH_TIMEOUT');
+        $timeout = is_string($raw) ? (float) $raw : 0.0;
+
+        return $timeout > 0 ? $timeout : 1.0;
+    }
+
     private function streamName(): string
     {
         $stream = getenv('AGENT_BUS_STREAM');
@@ -506,6 +722,13 @@ class Cli
         $bucket = getenv('AGENT_BUS_KV_BUCKET');
 
         return is_string($bucket) && $bucket !== '' ? $bucket : 'sessions';
+    }
+
+    private function aliasBucketName(): string
+    {
+        $bucket = getenv('AGENT_BUS_ALIAS_BUCKET');
+
+        return is_string($bucket) && $bucket !== '' ? $bucket : 'session_aliases';
     }
 
     /**
@@ -557,14 +780,16 @@ class Cli
     {
         fwrite(STDERR, <<<'TXT'
 Usage:
-  bin/agent-bus emit --type=<type> [--payload=<json>] [--session=<id>] [--agent-type=<name>] [--model=<name>]
-  bin/agent-bus send --session=<id> --payload=<json>
-  bin/agent-bus heartbeat --session=<id>
-  bin/agent-bus session-end --session=<id>
+  bin/agent-bus emit --type=<type> --agent-type=<name> [--payload=<json>] [--session=<id>] [--model=<name>]
+  bin/agent-bus send --session=<id-or-alias> --payload=<json>
+  bin/agent-bus heartbeat --session=<id> [--agent-type=<name>] [--model=<name>]
+  bin/agent-bus session-end --session=<id-or-alias>
   bin/agent-bus sessions
-  bin/agent-bus sessions get <id>
+  bin/agent-bus sessions get <id-or-alias>
   bin/agent-bus hook
   bin/agent-bus opencode
+
+Ids normalize to {kind}:{provider_id}; alternates resolve via the session_aliases KV bucket.
 
 Cold path (boots the framework):
   bin/agent-bus provision

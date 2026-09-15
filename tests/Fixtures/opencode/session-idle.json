@@ -1,6 +1,6 @@
 {
     "type": "session.idle",
     "properties": {
-        "sessionID": "oc-session-1"
+        "sessionID": "ses_testsession0001"
     }
 }

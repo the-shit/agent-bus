@@ -9,8 +9,9 @@ it('maps PostToolUse to one toolCall emit with payload.tool', function () {
         ->and($actions[0]->verb)->toBe('emit')
         ->and($actions[0]->type)->toBe('toolCall')
         ->and($actions[0]->agentType)->toBe('grok')
-        ->and($actions[0]->sessionId)->toBe('01a08ef9-2515-7460-89bd-5efc21f28642')
-        ->and($actions[0]->payload['tool'])->toBe('run_terminal_command');
+        ->and($actions[0]->sessionId)->toBe('grok:01a08ef9-2515-7460-89bd-5efc21f28642')
+        ->and($actions[0]->payload['tool'])->toBe('run_terminal_command')
+        ->and($actions[0]->aliases)->toBe(['01a08ef9-2515-7460-89bd-5efc21f28642']);
 });
 
 it('drops phase_changed so it is not published', function () {
@@ -53,13 +54,21 @@ it('drops Notification types that are not idle_prompt', function () {
 it('maps PostToolUseFailure to errorRaised', function () {
     $actions = GrokHook::actions([
         'hook_event_name' => 'PostToolUseFailure',
-        'sessionId' => 's1',
+        'sessionId' => '01a08ef9-2515-7460-89bd-5efc21f28642',
         'toolName' => 'run_terminal_command',
     ]);
 
     expect($actions)->toHaveCount(1)
         ->and($actions[0]->type)->toBe('errorRaised')
         ->and($actions[0]->payload['tool'])->toBe('run_terminal_command');
+});
+
+it('drops events with no provider id instead of falling back to a PID id', function () {
+    expect(GrokHook::actions([
+        'hook_event_name' => 'PostToolUse',
+        'toolName' => 'run_terminal_command',
+        'cwd' => '/tmp/no-session-here',
+    ]))->toBe([]);
 });
 
 it('skips subagent events', function () {

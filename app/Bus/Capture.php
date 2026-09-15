@@ -19,19 +19,31 @@ final class Capture
     }
 
     /**
+     * Raw session id candidates a reporter may have supplied, in priority
+     * order. Normalization into a canonical id lives in BusIdentity; the old
+     * PID-based fallback is gone because identity is never silently invented.
+     *
      * @param  array<string, mixed>  $event
+     * @return list<mixed>
      */
-    public static function sessionId(array $event, string $kind): string
+    public static function sessionIdCandidates(array $event): array
     {
-        foreach (self::sessionIdCandidates($event) as $value) {
-            if (is_string($value) && $value !== '') {
-                return $value;
-            }
-        }
+        $properties = is_array($event['properties'] ?? null) ? $event['properties'] : [];
+        $info = is_array($properties['info'] ?? null) ? $properties['info'] : (is_array($event['info'] ?? null) ? $event['info'] : []);
+        $input = is_array($event['input'] ?? null) ? $event['input'] : [];
 
-        $cwd = is_string($event['cwd'] ?? null) ? $event['cwd'] : (string) getcwd();
-
-        return $kind.'-'.substr(sha1($cwd), 0, 8).'-'.getmypid();
+        return [
+            $event['sessionId'] ?? null,
+            $event['session_id'] ?? null,
+            $event['sessionID'] ?? null,
+            $event['rolloutId'] ?? null,
+            $event['rollout_id'] ?? null,
+            $properties['sessionID'] ?? null,
+            $properties['sessionId'] ?? null,
+            $info['id'] ?? null,
+            $input['sessionID'] ?? null,
+            $input['sessionId'] ?? null,
+        ];
     }
 
     /**
@@ -74,27 +86,5 @@ final class Capture
         }
 
         return $payload;
-    }
-
-    /**
-     * @param  array<string, mixed>  $event
-     * @return list<mixed>
-     */
-    private static function sessionIdCandidates(array $event): array
-    {
-        $properties = is_array($event['properties'] ?? null) ? $event['properties'] : [];
-        $info = is_array($properties['info'] ?? null) ? $properties['info'] : (is_array($event['info'] ?? null) ? $event['info'] : []);
-        $input = is_array($event['input'] ?? null) ? $event['input'] : [];
-
-        return [
-            $event['sessionId'] ?? null,
-            $event['session_id'] ?? null,
-            $event['sessionID'] ?? null,
-            $properties['sessionID'] ?? null,
-            $properties['sessionId'] ?? null,
-            $info['id'] ?? null,
-            $input['sessionID'] ?? null,
-            $input['sessionId'] ?? null,
-        ];
     }
 }

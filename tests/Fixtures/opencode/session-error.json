@@ -1,7 +1,7 @@
 {
     "type": "session.error",
     "properties": {
-        "sessionID": "oc-session-1",
+        "sessionID": "ses_testsession0001",
         "error": {
             "message": "boom"
         }

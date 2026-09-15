@@ -14,10 +14,15 @@ final class GrokHook
             return [];
         }
 
-        $sessionId = Capture::sessionId($event, 'grok');
+        $sessionId = BusIdentity::resolve('grok', $event);
+
+        if ($sessionId === null) {
+            return [];
+        }
+
         $model = Capture::model($event);
 
-        return match (Capture::eventName($event)) {
+        $actions = match (Capture::eventName($event)) {
             'sessionstart' => [
                 self::heartbeat($sessionId, $model),
                 self::emit($sessionId, 'sessionStart', $event, $model),
@@ -39,6 +44,14 @@ final class GrokHook
             ],
             default => [],
         };
+
+        if ($actions === []) {
+            return [];
+        }
+
+        $aliases = BusIdentity::aliases($sessionId, $event);
+
+        return array_map(fn (CaptureAction $action): CaptureAction => $action->withAliases($aliases), $actions);
     }
 
     /**

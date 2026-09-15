@@ -15,6 +15,10 @@ return [
         'ttl_seconds' => (int) env('AGENT_BUS_KV_TTL', 90),
     ],
 
+    'aliases' => [
+        'bucket' => env('AGENT_BUS_ALIAS_BUCKET', 'session_aliases'),
+    ],
+
     'herdr' => [
         'binary' => env('AGENT_BUS_HERDR', 'herdr'),
     ],
