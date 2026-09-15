@@ -1,7 +1,7 @@
 {
     "type": "tool.execute.after",
     "tool": "run_terminal_command",
-    "sessionID": "oc-session-1",
+    "sessionID": "ses_testsession0001",
     "callID": "call-1",
     "args": {
         "command": "composer test"

@@ -9,7 +9,7 @@ it('maps tool.execute.after onto the same toolCall emit as Grok', function () {
         ->and($actions[0]->verb)->toBe('emit')
         ->and($actions[0]->type)->toBe('toolCall')
         ->and($actions[0]->agentType)->toBe('opencode')
-        ->and($actions[0]->sessionId)->toBe('oc-session-1')
+        ->and($actions[0]->sessionId)->toBe('opencode:ses_testsession0001')
         ->and($actions[0]->payload['tool'])->toBe('run_terminal_command');
 });
 
@@ -43,7 +43,12 @@ it('maps session.error to errorRaised', function () {
 
     expect($actions)->toHaveCount(1)
         ->and($actions[0]->type)->toBe('errorRaised')
-        ->and($actions[0]->sessionId)->toBe('oc-session-1');
+        ->and($actions[0]->sessionId)->toBe('opencode:ses_testsession0001');
+});
+
+it('drops events with no ses_* provider id instead of inventing identity', function () {
+    expect(OpenCodeCapture::actions(['type' => 'session.idle', 'properties' => ['sessionID' => 'not-a-session']]))->toBe([])
+        ->and(OpenCodeCapture::actions(['type' => 'session.idle']))->toBe([]);
 });
 
 it('does not publish unlisted OpenCode events', function () {

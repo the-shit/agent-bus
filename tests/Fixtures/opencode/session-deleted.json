@@ -2,7 +2,7 @@
     "type": "session.deleted",
     "properties": {
         "info": {
-            "id": "oc-session-1"
+            "id": "ses_testsession0001"
         }
     }
 }

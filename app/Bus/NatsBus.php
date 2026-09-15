@@ -61,6 +61,11 @@ class NatsBus
         return (string) config('agent_bus.kv.bucket', 'sessions');
     }
 
+    public function aliasesBucket(): string
+    {
+        return (string) config('agent_bus.aliases.bucket', 'session_aliases');
+    }
+
     public function provision(): void
     {
         $stream = $this->stream();
@@ -85,6 +90,14 @@ class NatsBus
         $stream = $bucket->getStream();
         $bucket->getConfiguration()->configureStream($stream->getConfiguration());
         $stream->update();
+
+        // Alternate id -> canonical id map. No TTL: aliases are durable
+        // pointers, unlike the 90s presence records.
+        $aliases = $this->nats->jetstream()->api()->getBucket($this->aliasesBucket());
+        $aliasStream = $aliases->getStream();
+        $aliases->getConfiguration()->setHistory(1);
+        $aliases->getConfiguration()->configureStream($aliasStream->getConfiguration());
+        $aliasStream->update();
     }
 
     public function sessionTtlNanos(): int
@@ -158,6 +171,57 @@ class NatsBus
         $value = $this->bucket()->get($id);
 
         return is_string($value) ? $value : null;
+    }
+
+    /**
+     * Canonical id whose presence is on the bus, resolving the given id
+     * through the alias map first. Null when nothing is registered.
+     */
+    public function resolveSessionId(string $id): ?string
+    {
+        if ($this->getSession($id) !== null) {
+            return $id;
+        }
+
+        $canonical = $this->getAlias($id);
+
+        if ($canonical !== null && $this->getSession($canonical) !== null) {
+            return $canonical;
+        }
+
+        return null;
+    }
+
+    public function putAlias(string $alternate, string $canonical): void
+    {
+        $this->aliasBucket()->put(self::aliasKey($alternate), json_encode([
+            'alternate' => $alternate,
+            'canonical' => $canonical,
+            'createdAt' => gmdate('Y-m-d\TH:i:s\Z'),
+        ], JSON_THROW_ON_ERROR));
+    }
+
+    public function getAlias(string $alternate): ?string
+    {
+        $value = $this->aliasBucket()->get(self::aliasKey($alternate));
+
+        if (! is_string($value) || $value === '') {
+            return null;
+        }
+
+        $decoded = json_decode($value, true);
+        $canonical = is_array($decoded) ? ($decoded['canonical'] ?? null) : null;
+
+        return is_string($canonical) && $canonical !== '' ? $canonical : null;
+    }
+
+    /**
+     * Alternate ids hold dots/slashes the KV backing stream's single-token
+     * subject cannot store (issue #30, bug a) — hash the key.
+     */
+    public static function aliasKey(string $alternate): string
+    {
+        return hash('sha256', $alternate);
     }
 
     /**
@@ -259,5 +323,10 @@ class NatsBus
     private function bucket(): Bucket
     {
         return $this->nats->jetstream()->api()->getBucket($this->kvBucket());
+    }
+
+    private function aliasBucket(): Bucket
+    {
+        return $this->nats->jetstream()->api()->getBucket($this->aliasesBucket());
     }
 }

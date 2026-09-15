@@ -201,7 +201,8 @@ class Server
             return $this->errorResult(-32602, 'sessionId is required');
         }
 
-        $presence = $this->decodePresence($this->bus->getSession($sessionId));
+        $resolved = $this->bus->resolveSessionId($sessionId);
+        $presence = $resolved !== null ? $this->decodePresence($this->bus->getSession($resolved)) : null;
 
         if ($presence === null) {
             return $this->textResult("session {$sessionId} is not on the bus", is_error: true);
@@ -227,14 +228,16 @@ class Server
             return $this->errorResult(-32602, 'payload must be a JSON object');
         }
 
-        $presence = $this->decodePresence($this->bus->getSession($sessionId));
+        $resolved = $this->bus->resolveSessionId($sessionId);
+        $presence = $resolved !== null ? $this->decodePresence($this->bus->getSession($resolved)) : null;
 
         if ($presence === null) {
             return $this->textResult("session {$sessionId} is not on the bus", is_error: true);
         }
 
         $envelope = [
-            'sessionId' => $sessionId,
+            'v' => 2,
+            'sessionId' => $resolved,
             'agentType' => $this->env('AGENT_BUS_AGENT_TYPE', ''),
             'model' => $this->env('AGENT_BUS_MODEL', ''),
             'repo' => is_string($presence['repo'] ?? null) ? $presence['repo'] : 'unknown/unknown',
@@ -243,7 +246,7 @@ class Server
             'payload' => $payload,
         ];
 
-        $this->bus->publishEnvelope('session.'.$sessionId.'.inbox', $envelope);
+        $this->bus->publishEnvelope('session.'.$resolved.'.inbox', $envelope);
 
         return $this->textResult($this->encode($envelope));
     }

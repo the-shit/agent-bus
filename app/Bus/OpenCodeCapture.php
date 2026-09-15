@@ -10,10 +10,15 @@ final class OpenCodeCapture
      */
     public static function actions(array $event): array
     {
-        $sessionId = Capture::sessionId($event, 'opencode');
+        $sessionId = BusIdentity::resolve('opencode', $event);
+
+        if ($sessionId === null) {
+            return [];
+        }
+
         $model = Capture::model($event);
 
-        return match (Capture::eventName($event)) {
+        $actions = match (Capture::eventName($event)) {
             'toolexecuteafter' => [
                 self::emit($sessionId, 'toolCall', $event, $model, Capture::toolPayload($event)),
             ],
@@ -34,6 +39,14 @@ final class OpenCodeCapture
             ],
             default => [],
         };
+
+        if ($actions === []) {
+            return [];
+        }
+
+        $aliases = BusIdentity::aliases($sessionId, $event);
+
+        return array_map(fn (CaptureAction $action): CaptureAction => $action->withAliases($aliases), $actions);
     }
 
     /**

@@ -26,7 +26,12 @@ Anything needing config, the container, or `Process` belongs on the cold path.
 
 - `app/Bus/` — the bus. `Capture`, `GrokHook`, `OpenCodeCapture` are pure
   static mappers from a harness event to `CaptureAction`s; they take arrays and
-  return arrays, and their tests never touch a container.
+  return arrays, and their tests never touch a container. `BusIdentity` is the
+  one resolver from reporter-supplied ids to canonical `{kind}:{provider_id}`;
+  it returns null rather than inventing identity. Alternates (jsonl paths, raw
+  UUIDs, pane ids) live in the `session_aliases` KV bucket under sha256 keys —
+  the KV backing streams use single-token subjects, so raw alternates can
+  never be keys themselves (issue #30).
 - `app/Commands/` — cold-path commands. Laravel Zero discovers this directory.
 - `app/Providers/NatsServiceProvider.php` — extends the package provider to
   make `NATS_URL` the single broker setting and to drop the package's `nats:*`
@@ -40,6 +45,9 @@ Anything needing config, the container, or `Process` belongs on the cold path.
 - Constructor property promotion. No empty constructors.
 - PHPDoc blocks with array shapes over inline comments.
 - Run `vendor/bin/pint` before finishing. CI runs `vendor/bin/pint --test`.
+- Envelope v2 shipped 2026-09-15: `emit` requires `agentType` and stamps
+  top-level `"v": 2`. Consumers treat a missing `v` as v1 during the overlap;
+  v1 emit is refused after **2026-09-29**.
 
 ## Failure posture
 
