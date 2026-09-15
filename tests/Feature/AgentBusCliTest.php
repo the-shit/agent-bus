@@ -169,19 +169,29 @@ describe('heartbeat and sessions', function () {
             ->and($stored['lastSeen'])->toBe($printed['lastSeen']);
     })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
-    it('lists session ids and prints one session from KV', function () {
+    it('lists full presence records and prints one session from KV', function () {
         $bus = app(NatsBus::class);
         $bus->provision();
 
         $sessionId = 'cli-sessions-get';
-        $json = json_encode(['sessionId' => $sessionId], JSON_THROW_ON_ERROR);
+        $json = json_encode(['sessionId' => $sessionId, 'agentType' => 'grok'], JSON_THROW_ON_ERROR);
         $bus->putSession($sessionId, $json);
 
         $list = agentBusCli(['sessions']);
-        $ids = json_decode($list->output(), true);
+        $listed = json_decode($list->output(), true);
 
         expect($list->exitCode())->toBe(0)
-            ->and($ids)->toContain($sessionId);
+            ->and($listed)->toBeArray()
+            ->and(array_column($listed, 'sessionId'))->toContain($sessionId);
+
+        $hit = array_values(array_filter(
+            $listed,
+            fn (mixed $row): bool => is_array($row) && ($row['sessionId'] ?? null) === $sessionId,
+        ))[0] ?? null;
+        expect($hit)->toMatchArray(['sessionId' => $sessionId, 'agentType' => 'grok']);
+
+        $idsOnly = agentBusCli(['sessions', '--ids']);
+        expect(json_decode($idsOnly->output(), true))->toContain($sessionId);
 
         $get = agentBusCli(['sessions', 'get', $sessionId]);
 
@@ -329,14 +339,14 @@ describe('session-end', function () {
         agentBusCli(['heartbeat', '--session='.$sessionId, '--agent-type=grok']);
 
         $listed = json_decode(agentBusCli(['sessions'])->output(), true);
-        expect($listed)->toContain($sessionId);
+        expect(array_column($listed, 'sessionId'))->toContain($sessionId);
 
         $result = agentBusCli(['session-end', '--session='.$sessionId]);
 
         expect($result->exitCode())->toBe(0);
 
         $after = json_decode(agentBusCli(['sessions'])->output(), true);
-        expect($after)->not->toContain($sessionId);
+        expect(array_column($after, 'sessionId'))->not->toContain($sessionId);
     })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
 
@@ -378,6 +388,38 @@ describe('identity normalization', function () {
 
         expect($explicit['registered'])->toBe('explicit')
             ->and($explicit['firstSeen'])->toBe($implicit['firstSeen']);
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+    it('repairs a v1 KV row that was frozen as explicit', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $uuid = 'a1b2c3d4-e5f6-4789-8abc-def012345678';
+        $canonical = 'grok:'.$uuid;
+        $bus->deleteSession($canonical);
+        $bus->putSession($canonical, json_encode([
+            'sessionId' => $canonical,
+            'timestamp' => '2026-09-11T00:00:00Z',
+        ], JSON_THROW_ON_ERROR));
+
+        $result = agentBusCli([
+            'emit',
+            '--type=toolCall',
+            '--session='.$uuid,
+            '--agent-type=grok',
+            '--model=grok-4.6',
+            '--payload={"tool":"composer"}',
+        ]);
+
+        expect($result->exitCode())->toBe(0);
+
+        $repaired = json_decode((string) $bus->getSession($canonical), true);
+
+        expect($repaired['v'])->toBe(2)
+            ->and($repaired['agentType'])->toBe('grok')
+            ->and($repaired['model'])->toBe('grok-4.6')
+            ->and($repaired['registered'])->toBe('implicit')
+            ->and($repaired['identity_quality'])->toBe('session');
     })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
     it('resolves sessions get and send through the alias map', function () {

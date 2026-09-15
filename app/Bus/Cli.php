@@ -81,7 +81,7 @@ class Cli
             'send' => $this->send($options),
             'heartbeat' => $this->heartbeat($options),
             'session-end' => $this->sessionEnd($options),
-            'sessions' => $this->sessions($positionals),
+            'sessions' => $this->sessions($positionals, $options),
             'hook' => $this->fromStdin(GrokHook::class),
             'opencode' => $this->fromStdin(OpenCodeCapture::class),
             default => $this->usage(),
@@ -187,18 +187,49 @@ class Cli
         }
 
         if ($record !== null) {
-            // v1 records carry no registered marker; treat them as explicit.
+            // v1 rows have no `registered` marker. Treating that as explicit
+            // froze degraded records forever — emit must repair them.
             $registered = $record['registered'] ?? null;
             $registered = is_string($registered) ? $registered : 'explicit';
+            $degraded = (int) ($record['v'] ?? 1) !== 2
+                || ! is_string($record['agentType'] ?? null)
+                || $record['agentType'] === ''
+                || ! is_string($record['sessionId'] ?? null)
+                || $record['sessionId'] === '';
 
-            if ($registered === 'explicit') {
-                return; // explicit presence is managed by heartbeat/sessionStart
+            if ($registered === 'explicit' && ! $degraded && ! $explicit) {
+                return; // healthy explicit presence is managed by heartbeat
             }
 
+            $record['v'] = 2;
+            $record['sessionId'] = $envelope['sessionId'];
             $record['lastSeen'] = $now;
+            $record['identity_quality'] = BusIdentity::quality($envelope['sessionId']);
 
             if ($explicit) {
                 $record['registered'] = 'explicit';
+            } elseif (! is_string($record['registered'] ?? null)) {
+                $record['registered'] = 'implicit';
+            }
+
+            if (($record['agentType'] ?? '') === '' && $envelope['agentType'] !== '') {
+                $record['agentType'] = $envelope['agentType'];
+            }
+
+            if (($record['model'] ?? '') === '' && $envelope['model'] !== '') {
+                $record['model'] = $envelope['model'];
+            }
+
+            if (($record['repo'] ?? '') === '' && $envelope['repo'] !== '') {
+                $record['repo'] = $envelope['repo'];
+            }
+
+            if (($record['host'] ?? '') === '') {
+                $record['host'] = gethostname() ?: '';
+            }
+
+            if (! is_string($record['firstSeen'] ?? null) || $record['firstSeen'] === '') {
+                $record['firstSeen'] = $now;
             }
 
             $this->putSession($envelope['sessionId'], json_encode($record, JSON_THROW_ON_ERROR));
@@ -382,14 +413,15 @@ class Cli
 
     /**
      * @param  list<string>  $positionals
+     * @param  array<string, string>  $options
      */
-    private function sessions(array $positionals): int
+    private function sessions(array $positionals, array $options): int
     {
         $subcommand = $positionals[1] ?? 'list';
 
         try {
             return match ($subcommand) {
-                'list' => $this->listSessions(),
+                'list' => $this->listSessions($options),
                 'get' => $this->getSession($positionals[2] ?? ''),
                 default => $this->usage(),
             };
@@ -402,19 +434,52 @@ class Cli
         }
     }
 
-    private function listSessions(): int
+    /**
+     * Default: one KV scan of full presence records. `--ids` keeps the old
+     * string-array shape for scripts that only want keys.
+     *
+     * @param  array<string, string>  $options
+     */
+    private function listSessions(array $options): int
     {
-        $ids = [];
+        $idsOnly = ($options['ids'] ?? '') === '1';
+        $sessions = [];
 
         foreach ($this->client()->getApi()->getBucket($this->kvBucket())->getAll() as $entry) {
-            if ($entry->key !== '' && is_string($entry->value) && $entry->value !== '') {
-                $ids[$entry->key] = $entry->key;
+            if ($entry->key === '' || ! is_string($entry->value) || $entry->value === '') {
+                continue;
             }
+
+            if ($idsOnly) {
+                $sessions[] = $entry->key;
+
+                continue;
+            }
+
+            $sessions[] = $this->decodePresence($entry->key, $entry->value);
         }
 
-        echo json_encode(array_values($ids), JSON_THROW_ON_ERROR)."\n";
+        echo json_encode(array_values($sessions), JSON_THROW_ON_ERROR)."\n";
 
         return 0;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function decodePresence(string $key, string $json): array
+    {
+        $decoded = json_decode($json, true);
+
+        if (! is_array($decoded)) {
+            return ['sessionId' => $key];
+        }
+
+        if (! isset($decoded['sessionId']) || ! is_string($decoded['sessionId']) || $decoded['sessionId'] === '') {
+            $decoded['sessionId'] = $key;
+        }
+
+        return $decoded;
     }
 
     private function getSession(string $id): int
@@ -807,7 +872,7 @@ Usage:
   bin/agent-bus send --session=<id-or-alias> --payload=<json>
   bin/agent-bus heartbeat --session=<id> [--agent-type=<name>] [--model=<name>]
   bin/agent-bus session-end --session=<id-or-alias>
-  bin/agent-bus sessions
+  bin/agent-bus sessions [--ids]
   bin/agent-bus sessions get <id-or-alias>
   bin/agent-bus hook
   bin/agent-bus opencode
