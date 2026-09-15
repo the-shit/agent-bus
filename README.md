@@ -120,6 +120,9 @@ bin/agent-bus send --session 01a08ef9-2515-7460-89bd-5efc21f28642 --payload='{"t
 
 bin/agent-bus heartbeat --session 01a08ef9-2515-7460-89bd-5efc21f28642
 bin/agent-bus sessions
+# JSON array of presence records (sessionId, agentType, lastSeen, …)
+bin/agent-bus sessions --ids
+# string array of KV keys, the old shape
 bin/agent-bus sessions get 01a08ef9-2515-7460-89bd-5efc21f28642
 ```
 

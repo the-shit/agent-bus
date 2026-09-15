@@ -225,6 +225,39 @@ class NatsBus
     }
 
     /**
+     * One KV getAll. Presence records as stored, with sessionId filled from the
+     * key when the JSON omitted it.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function listPresence(): array
+    {
+        $sessions = [];
+
+        foreach ($this->bucket()->getAll() as $entry) {
+            if ($entry->key === '' || ! is_string($entry->value) || $entry->value === '') {
+                continue;
+            }
+
+            $decoded = json_decode($entry->value, true);
+
+            if (! is_array($decoded)) {
+                $sessions[] = ['sessionId' => $entry->key];
+
+                continue;
+            }
+
+            if (! isset($decoded['sessionId']) || ! is_string($decoded['sessionId']) || $decoded['sessionId'] === '') {
+                $decoded['sessionId'] = $entry->key;
+            }
+
+            $sessions[] = $decoded;
+        }
+
+        return $sessions;
+    }
+
+    /**
      * @return list<string>
      */
     public function listSessionIds(): array

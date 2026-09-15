@@ -109,6 +109,31 @@ it('returns an error result when get_session misses', function () {
         ->toContain('not on the bus');
 });
 
+it('lists full presence records from one KV scan', function () {
+    $bus = app(NatsBus::class);
+    $sessionId = 'mcp-list-'.Str::uuid();
+    $bus->putSession($sessionId, json_encode([
+        'v' => 2,
+        'sessionId' => $sessionId,
+        'agentType' => 'grok',
+        'repo' => 'the-shit/agent-bus',
+    ], JSON_THROW_ON_ERROR));
+
+    $response = mcpSingle('{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"list_sessions","arguments":{"repo":"the-shit/agent-bus"}}}');
+
+    expect($response['result']['isError'])->toBeFalse();
+
+    $listed = json_decode($response['result']['content'][0]['text'], true, flags: JSON_THROW_ON_ERROR);
+    $hit = array_values(array_filter(
+        $listed,
+        fn (mixed $row): bool => is_array($row) && ($row['sessionId'] ?? null) === $sessionId,
+    ))[0] ?? null;
+
+    expect(array_column($listed, 'sessionId'))->toContain($sessionId)
+        ->and($hit['agentType'])->toBe('grok')
+        ->and($hit['repo'])->toBe('the-shit/agent-bus');
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
 it('reads a session from KV through get_session', function () {
     $bus = app(NatsBus::class);
     $sessionId = 'mcp-'.Str::uuid();

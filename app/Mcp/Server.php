@@ -172,13 +172,7 @@ class Server
         $repo = is_string($arguments['repo'] ?? null) ? $arguments['repo'] : null;
         $sessions = [];
 
-        foreach ($this->bus->listSessionIds() as $sessionId) {
-            $presence = $this->decodePresence($this->bus->getSession($sessionId));
-
-            if ($presence === null) {
-                continue;
-            }
-
+        foreach ($this->bus->listPresence() as $presence) {
             if ($repo !== null && ($presence['repo'] ?? '') !== $repo) {
                 continue;
             }
