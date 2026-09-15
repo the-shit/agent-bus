@@ -2,19 +2,58 @@
 
 use App\Bus\SessionPaneMap;
 
-it('maps herdr agent_session.value to pane_id when the session is in KV', function () {
+it('maps herdr agent_session.value to pane_id when the canonical id is in KV', function () {
     $map = (new SessionPaneMap)->build(
         agentsFromHerdrList(herdrAgentListJson([
             herdrAgent('01a08ef9-2515-7460-89bd-5efc21f28642', 'w2:p2'),
             herdrAgent('01a08ee2-779b-7cc2-87a1-d5aa858c8e13', 'w2:p1'),
         ])),
-        ['01a08ef9-2515-7460-89bd-5efc21f28642', '01a08ee2-779b-7cc2-87a1-d5aa858c8e13'],
+        ['grok:01a08ef9-2515-7460-89bd-5efc21f28642', 'grok:01a08ee2-779b-7cc2-87a1-d5aa858c8e13'],
     );
 
     expect($map)->toBe([
-        '01a08ef9-2515-7460-89bd-5efc21f28642' => 'w2:p2',
-        '01a08ee2-779b-7cc2-87a1-d5aa858c8e13' => 'w2:p1',
+        'grok:01a08ef9-2515-7460-89bd-5efc21f28642' => 'w2:p2',
+        'grok:01a08ee2-779b-7cc2-87a1-d5aa858c8e13' => 'w2:p1',
     ]);
+});
+
+it('converges a pi jsonl path onto the canonical pi:{uuid} id', function () {
+    $uuid = '01a09e6a-3b2c-4d5e-8f60-71a2b3c4d5e6';
+    $path = '/home/jordan/.pi/agent/sessions/--proj--/2026-09-13T05-36-19-422Z_'.$uuid.'.jsonl';
+
+    $map = (new SessionPaneMap)->build(
+        agentsFromHerdrList(herdrAgentListJson([
+            herdrAgent($path, 'w2:p1', 'pi'),
+        ])),
+        ['pi:'.$uuid],
+    );
+
+    expect($map)->toBe(['pi:'.$uuid => 'w2:p1']);
+});
+
+it('maps pane-grade herdr panes that have no session value', function () {
+    $map = (new SessionPaneMap)->build(
+        agentsFromHerdrList(herdrAgentListJson([
+            herdrPaneAgent('w2:p1'),
+        ])),
+        ['herdr:w2:p1'],
+    );
+
+    expect($map)->toBe(['herdr:w2:p1' => 'w2:p1']);
+});
+
+it('falls back to the alias map for claim ids that BusIdentity cannot place', function () {
+    $uuid = '01a09e6a-3b2c-4d5e-8f60-71a2b3c4d5e6';
+
+    $map = (new SessionPaneMap)->build(
+        agentsFromHerdrList(herdrAgentListJson([
+            herdrAgent('claim-session', 'w2:p1'),
+        ])),
+        ['pi:'.$uuid],
+        fn (string $alternate): ?string => $alternate === 'claim-session' ? 'pi:'.$uuid : null,
+    );
+
+    expect($map)->toBe(['pi:'.$uuid => 'w2:p1']);
 });
 
 it('drops herdr panes whose session is not in KV', function () {
@@ -91,16 +130,27 @@ function herdrAgentListJson(array $agents): string
 /**
  * @return array<string, mixed>
  */
-function herdrAgent(string $sessionId, string $paneId): array
+function herdrAgent(string $sessionId, string $paneId, string $kind = 'grok'): array
 {
     return [
-        'agent' => 'grok',
+        'agent' => $kind,
         'agent_session' => [
-            'agent' => 'grok',
+            'agent' => $kind,
             'kind' => 'id',
-            'source' => 'herdr:grok',
+            'source' => 'herdr:'.$kind,
             'value' => $sessionId,
         ],
+        'pane_id' => $paneId,
+    ];
+}
+
+/**
+ * @return array<string, mixed>
+ */
+function herdrPaneAgent(string $paneId): array
+{
+    return [
+        'agent' => 'hive',
         'pane_id' => $paneId,
     ];
 }

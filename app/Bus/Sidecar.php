@@ -20,6 +20,7 @@ class Sidecar
         return $this->map->build(
             $this->herdr->listAgents(),
             $this->bus->listSessionIds(),
+            fn (string $alternate): ?string => $this->bus->getAlias($alternate),
         );
     }
 

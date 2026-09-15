@@ -81,10 +81,11 @@ it('maps herdr sessions that are also in KV and drops the rest', function () {
     });
 
     $bus = Mockery::mock(NatsBus::class);
-    $bus->shouldReceive('listSessionIds')->once()->andReturn([$onBus, $kvOnly]);
+    $bus->shouldReceive('listSessionIds')->once()->andReturn(['grok:'.$onBus, $kvOnly]);
+    $bus->shouldReceive('getAlias')->andReturn(null);
     $this->app->instance(NatsBus::class, $bus);
 
-    expect($this->app->make(Sidecar::class)->rebuildMap())->toBe([$onBus => 'w2:p2']);
+    expect($this->app->make(Sidecar::class)->rebuildMap())->toBe(['grok:'.$onBus => 'w2:p2']);
 });
 
 it('rebuilds the map when herdr list changes', function () {
@@ -109,17 +110,18 @@ it('rebuilds the map when herdr list changes', function () {
     });
 
     $bus = Mockery::mock(NatsBus::class);
-    $bus->shouldReceive('listSessionIds')->andReturn([$sessionId]);
+    $bus->shouldReceive('listSessionIds')->andReturn(['grok:'.$sessionId]);
+    $bus->shouldReceive('getAlias')->andReturn(null);
     $this->app->instance(NatsBus::class, $bus);
 
     $sidecar = $this->app->make(Sidecar::class);
     $first = $sidecar->rebuildMap();
     $second = $sidecar->rebuildMap();
-    $body = json_encode(['sessionId' => $sessionId, 'payload' => ['text' => 'ping']], JSON_THROW_ON_ERROR);
-    $pane = $sidecar->deliver('session.'.$sessionId.'.inbox', $body, $second);
+    $body = json_encode(['sessionId' => 'grok:'.$sessionId, 'payload' => ['text' => 'ping']], JSON_THROW_ON_ERROR);
+    $pane = $sidecar->deliver('session.grok:'.$sessionId.'.inbox', $body, $second);
 
-    expect($first)->toBe([$sessionId => 'w2:p1'])
-        ->and($second)->toBe([$sessionId => 'w2:p8'])
+    expect($first)->toBe(['grok:'.$sessionId => 'w2:p1'])
+        ->and($second)->toBe(['grok:'.$sessionId => 'w2:p8'])
         ->and($pane)->toBe('w2:p8')
         ->and($prompted)->toBe([
             ['herdr', 'agent', 'prompt', 'w2:p8', $body],
@@ -129,7 +131,7 @@ it('rebuilds the map when herdr list changes', function () {
 it('ticks by consuming inbox JSON and prompting the mapped pane', function () {
     $sessionId = '01a08ef9-2515-7460-89bd-5efc21f28642';
     $paneId = 'w2:p2';
-    $body = json_encode(['sessionId' => $sessionId, 'payload' => ['text' => 'ping']], JSON_THROW_ON_ERROR);
+    $body = json_encode(['sessionId' => 'grok:'.$sessionId, 'payload' => ['text' => 'ping']], JSON_THROW_ON_ERROR);
 
     Process::preventStrayProcesses();
     Process::fake(function (PendingProcess $process) use ($sessionId, $paneId) {
@@ -143,9 +145,10 @@ it('ticks by consuming inbox JSON and prompting the mapped pane', function () {
     });
 
     $bus = Mockery::mock(NatsBus::class);
-    $bus->shouldReceive('listSessionIds')->once()->andReturn([$sessionId]);
+    $bus->shouldReceive('listSessionIds')->once()->andReturn(['grok:'.$sessionId]);
+    $bus->shouldReceive('getAlias')->andReturn(null);
     $bus->shouldReceive('consumeInbox')->once()->andReturnUsing(function (callable $handler) use ($sessionId, $body) {
-        $handler('session.'.$sessionId.'.inbox', $body);
+        $handler('session.grok:'.$sessionId.'.inbox', $body);
 
         return 1;
     });
@@ -154,7 +157,7 @@ it('ticks by consuming inbox JSON and prompting the mapped pane', function () {
     $delivered = $this->app->make(Sidecar::class)->tick();
 
     expect($delivered)->toBe([
-        ['sessionId' => $sessionId, 'pane_id' => $paneId],
+        ['sessionId' => 'grok:'.$sessionId, 'pane_id' => $paneId],
     ]);
 
     Process::assertRan(function (PendingProcess $process) use ($paneId, $body) {
@@ -226,6 +229,74 @@ it('consumes an inbox message and would prompt this pane', function () {
         return $process->command === ['herdr', 'agent', 'prompt', $paneId, $body];
     });
 })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+it('delivers a pi inbox to the pane herdr reported as a jsonl path', function () {
+    $hex = bin2hex(random_bytes(16));
+    $uuid = substr($hex, 0, 8).'-'.substr($hex, 8, 4).'-'.substr($hex, 12, 4).'-'.substr($hex, 16, 4).'-'.substr($hex, 20, 12);
+    $path = '/home/jordan/.pi/agent/sessions/--sidecar--/2026-09-15T00-00-00-000Z_'.$uuid.'.jsonl';
+    $canonical = 'pi:'.$uuid;
+    $paneId = 'w2:p2';
+    $envelope = [
+        'sessionId' => $canonical,
+        'agentType' => 'pi',
+        'model' => '',
+        'repo' => 'the-shit/agent-bus',
+        'type' => 'inbox',
+        'timestamp' => '2026-09-11T06:00:00Z',
+        'payload' => ['text' => 'ping'],
+    ];
+    $body = json_encode($envelope, JSON_THROW_ON_ERROR);
+
+    Process::preventStrayProcesses();
+    Process::fake(function (PendingProcess $process) use ($path, $paneId) {
+        $command = $process->command;
+
+        if (($command[2] ?? null) === 'list') {
+            return Process::result(sidecarHerdrListJson([
+                piJsonlAgent($path, $paneId),
+            ]));
+        }
+
+        if (($command[2] ?? null) === 'prompt') {
+            return Process::result('{"ok":true}');
+        }
+
+        return Process::result(errorOutput: 'unexpected herdr command', exitCode: 1);
+    });
+
+    config(['agent_bus.sidecar.consumer' => 'sidecar-test-'.bin2hex(random_bytes(4))]);
+
+    $bus = app(NatsBus::class);
+    $bus->provision();
+    $bus->putSession($canonical, json_encode(['sessionId' => $canonical], JSON_THROW_ON_ERROR));
+    $bus->ensureInboxConsumer();
+    $bus->publishEnvelope('session.'.$canonical.'.inbox', $envelope);
+
+    $this->artisan('sidecar', ['--once' => true])
+        ->expectsOutputToContain("prompted {$paneId} for session {$canonical}")
+        ->assertSuccessful();
+
+    Process::assertRan(function (PendingProcess $process) use ($paneId, $body) {
+        return $process->command === ['herdr', 'agent', 'prompt', $paneId, $body];
+    });
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+/**
+ * @return array<string, mixed>
+ */
+function piJsonlAgent(string $path, string $paneId): array
+{
+    return [
+        'agent' => 'pi',
+        'agent_session' => [
+            'agent' => 'pi',
+            'kind' => 'path',
+            'source' => 'herdr:pi',
+            'value' => $path,
+        ],
+        'pane_id' => $paneId,
+    ];
+}
 
 /**
  * @param  list<array<string, mixed>>  $agents
