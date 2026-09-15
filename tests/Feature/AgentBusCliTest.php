@@ -419,6 +419,37 @@ describe('identity normalization', function () {
             ->and($bus->lastEnvelope('session.'.$canonical.'.inbox')['payload'])->toBe(['text' => 'ping']);
     })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
+    // emit and heartbeat mint identity, so the token check fires before the
+    // broker is even consulted. send/session-end resolve alternates first
+    // (dotted jsonl paths are legal inputs), so their guard rides on the
+    // resolved canonical id as defense-in-depth.
+    it('rejects ids that are not one clean NATS token before touching the broker', function (array $arguments) {
+        $result = agentBusCli($arguments, ['NATS_URL' => 'nats://127.0.0.1:1']);
+
+        expect($result->exitCode())->toBe(1)
+            ->and($result->errorOutput())->toContain('is not a single NATS token')
+            ->and($result->errorOutput())->toContain('issue #30');
+    })->with([
+        'emit' => [['emit', '--type=toolCall', '--session=dotted.id', '--agent-type=probe']],
+        'heartbeat' => [['heartbeat', '--session=dotted.id']],
+    ]);
+
+    it('still resolves dotted alternates through the alias map', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        // Validation guards resolved ids, not free-form alternates — a jsonl
+        // path full of dots must keep flowing through the alias map.
+        $uuid = '4d5e6f70-1122-4334-8556-66778899aabb';
+        $path = '/home/jordan/.pi/agent/sessions/--proj--/2026-09-15T04-00-00-000Z_'.$uuid.'.jsonl';
+        agentBusCli(['emit', '--type=toolCall', '--session='.$path, '--agent-type=pi', '--payload={"tool":"read"}']);
+
+        $get = agentBusCli(['sessions', 'get', $path]);
+
+        expect($get->exitCode())->toBe(0)
+            ->and(json_decode($get->output(), true)['sessionId'])->toBe('pi:'.$uuid);
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
     it('fails closed when neither the id nor any alias of it is on the bus', function () {
         $bus = app(NatsBus::class);
         $bus->provision();
