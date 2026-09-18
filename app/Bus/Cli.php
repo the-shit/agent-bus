@@ -65,6 +65,7 @@ class Cli
             'send' => $this->send($options),
             'heartbeat' => $this->heartbeat($options),
             'sessions' => $this->sessions($positionals),
+            'delete' => $this->deleteSession($positionals),
             default => $this->usage(),
         };
     }
@@ -129,12 +130,15 @@ class Cli
     private function heartbeat(array $options): int
     {
         $sessionId = $this->sessionId($options, required: true);
+        $cwd = $this->option($options, 'cwd', 'AGENT_BUS_CWD', getcwd() ?: '');
         $presence = [
             'sessionId' => $sessionId,
             'agentType' => $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'),
             'model' => $this->option($options, 'model', 'AGENT_BUS_MODEL'),
+            'cwd' => $cwd,
             'repo' => $this->repo(),
-            'timestamp' => gmdate('Y-m-d\TH:i:s\Z'),
+            'status' => 'active',
+            'lastSeen' => gmdate('Y-m-d\TH:i:s\Z'),
         ];
 
         try {
@@ -202,6 +206,25 @@ class Cli
         }
 
         echo $value."\n";
+
+        return 0;
+    }
+
+    private function deleteSession(array $positionals): int
+    {
+        $id = $positionals[1] ?? '';
+
+        if ($id === '') {
+            throw new InvalidArgumentException('Missing session id.');
+        }
+
+        try {
+            $this->client()->getApi()->getBucket($this->kvBucket())->delete($id);
+        } catch (Throwable $exception) {
+            fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
+
+            return 1;
+        }
 
         return 0;
     }
@@ -429,6 +452,7 @@ Usage:
   bin/agent-bus heartbeat --session=<id>
   bin/agent-bus sessions
   bin/agent-bus sessions get <id>
+  bin/agent-bus delete <id>
 TXT."\n");
 
         return 1;

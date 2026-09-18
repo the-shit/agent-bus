@@ -49,6 +49,15 @@ Stay local: `phase_changed`, permission chatter, MCP connect, token stream, the 
 
 Hooks already get `sessionId`, `cwd`, `toolName` on stdin. A tiny `agent-bus emit` CLI publishes. Laravel does not boot on every tool call.
 
+### Install hooks
+
+```bash
+cp hooks/* ~/.grok/hooks/
+chmod +x ~/.grok/hooks/*
+```
+
+Grok will call these when its events fire.
+
 - **Send:** MCP/CLI `send` publishes to `session.{id}.inbox`. A host sidecar subscribed to *this* session injects into the target (Herdr `agent prompt` for Grok). Prove: two agents, one send, the other turn starts with the JSON. No paste.
 - **First clients:** Grok Build and OpenCode.
 

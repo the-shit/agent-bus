@@ -1,0 +1,101 @@
+#!/usr/bin/env php
+<?php
+
+require __DIR__.'/../vendor/autoload.php';
+
+$input = file_get_contents('php://stdin');
+
+if ($input === false) {
+    exit(0);
+}
+
+$data = json_decode($input, true);
+
+if (! is_array($data)) {
+    exit(0);
+}
+
+$type = $data['event'] ?? ($data['type'] ?? '');
+
+$mappedType = match (true) {
+    $type === 'StopFailure' => 'errorRaised',
+    $type === 'SessionEndFailure' => 'errorRaised',
+    default => null,
+};
+
+if ($mappedType === null) {
+    exit(0);
+}
+
+$sessionId = $data['sessionId'] ?? '';
+
+if ($sessionId === '') {
+    exit(0);
+}
+
+$payload = [];
+
+if (isset($data['message'])) {
+    $payload['message'] = $data['message'];
+}
+
+if (isset($data['error'])) {
+    $payload['message'] = $data['error'];
+}
+
+$env = [
+    'NATS_URL' => getenv('NATS_URL') ?: 'nats://127.0.0.1:4222',
+];
+
+$options = [
+    '--type' => $mappedType,
+    '--payload' => json_encode($payload, JSON_THROW_ON_ERROR),
+    '--session' => $sessionId,
+];
+
+if ($agentType = getenv('AGENT_BUS_AGENT_TYPE')) {
+    $options['--agent-type'] = $agentType;
+}
+
+if ($model = getenv('AGENT_BUS_MODEL')) {
+    $options['--model'] = $model;
+}
+
+runAgentBus($options, $env);
+
+exit(0);
+
+function runAgentBus(array $options, array $env): void
+{
+    $process = proc_open(
+        [PHP_BINARY, __DIR__.'/../bin/agent-bus', 'emit', ...formatOptions($options)],
+        [
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $pipes,
+        null,
+        $env,
+    );
+
+    if (! is_resource($process)) {
+        exit(0);
+    }
+
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    proc_close($process);
+}
+
+function formatOptions(array $options): array
+{
+    $formatted = [];
+
+    foreach ($options as $key => $value) {
+        if (str_starts_with($key, '--')) {
+            $formatted[] = $key.'='.$value;
+        }
+    }
+
+    return $formatted;
+}
