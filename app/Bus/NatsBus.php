@@ -66,13 +66,25 @@ class NatsBus
     {
         $stream = $this->stream();
         $configuration = $stream->getConfiguration();
+        $subjects = $this->subjects();
+        $existed = $stream->exists();
 
-        if (! $stream->exists()) {
-            $configuration->setSubjects($this->subjects());
+        if (! $existed) {
+            $configuration->setSubjects($subjects);
             $configuration->setDuplicateWindow(2.0);
         }
 
         $stream->createIfNotExists();
+
+        if ($existed) {
+            $current = $configuration->getSubjects();
+            $missing = array_values(array_diff($subjects, $current));
+
+            if ($missing !== []) {
+                $configuration->setSubjects(array_values(array_unique([...$current, ...$subjects])));
+                $stream->update();
+            }
+        }
 
         $ttlSeconds = (int) config('agent_bus.kv.ttl_seconds', 90);
         $history = (int) config('agent_bus.kv.history', 1);

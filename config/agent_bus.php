@@ -7,6 +7,7 @@ return [
     'subjects' => [
         'repo.>',
         'session.>',
+        'spotify.>',
     ],
 
     'kv' => [

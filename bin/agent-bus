@@ -28,7 +28,7 @@ if (in_array($argv[1] ?? '', Cli::HOT_VERBS, true)) {
 }
 
 /*
- * Cold path. provision, sidecar, and the framework's own commands boot
+ * Cold path. provision, sidecar, music, and the framework's own commands boot
  * Laravel Zero. This is the process that stays up, not the one hooks spawn.
  */
 $app = require_once __DIR__.'/../bootstrap/app.php';
