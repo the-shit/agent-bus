@@ -62,6 +62,11 @@ class NatsBus
         return (string) config('agent_bus.kv.bucket', 'sessions');
     }
 
+    public function aliasesBucket(): string
+    {
+        return (string) config('agent_bus.aliases.bucket', 'session_aliases');
+    }
+
     public function provision(): void
     {
         $stream = $this->stream();
@@ -86,6 +91,14 @@ class NatsBus
         $stream = $bucket->getStream();
         $bucket->getConfiguration()->configureStream($stream->getConfiguration());
         $stream->update();
+
+        // Alternate id -> canonical id map. No TTL: aliases are durable
+        // pointers, unlike the 90s presence records.
+        $aliases = $this->nats->jetstream()->api()->getBucket($this->aliasesBucket());
+        $aliasStream = $aliases->getStream();
+        $aliases->getConfiguration()->setHistory(1);
+        $aliases->getConfiguration()->configureStream($aliasStream->getConfiguration());
+        $aliasStream->update();
     }
 
     public function sessionTtlNanos(): int
@@ -156,6 +169,98 @@ class NatsBus
     }
 
     /**
+     * Canonical id whose presence is on the bus, resolving the given id
+     * through the alias map first. Null when nothing is registered.
+     */
+    public function resolveSessionId(string $id): ?string
+    {
+        if ($this->getSession($id) !== null) {
+            return $id;
+        }
+
+        $canonical = $this->getAlias($id);
+
+        if ($canonical !== null && $this->getSession($canonical) !== null) {
+            return $canonical;
+        }
+
+        return null;
+    }
+
+    public function putAlias(string $alternate, string $canonical): void
+    {
+        $this->aliasBucket()->put(self::aliasKey($alternate), json_encode([
+            'alternate' => $alternate,
+            'canonical' => $canonical,
+            'createdAt' => gmdate('Y-m-d\TH:i:s\Z'),
+        ], JSON_THROW_ON_ERROR));
+    }
+
+    public function getAlias(string $alternate): ?string
+    {
+        if ($alternate === '') {
+            return null;
+        }
+
+        try {
+            $value = $this->aliasBucket()->get(self::aliasKey($alternate));
+        } catch (\Throwable) {
+            return null;
+        }
+
+        if (! is_string($value) || $value === '') {
+            return null;
+        }
+
+        $decoded = json_decode($value, true);
+        $canonical = is_array($decoded) ? ($decoded['canonical'] ?? null) : null;
+
+        return is_string($canonical) && $canonical !== '' ? $canonical : null;
+    }
+
+    /**
+     * Alternate ids hold dots/slashes the KV backing stream's single-token
+     * subject cannot store (issue #30, bug a) — hash the key.
+     */
+    public static function aliasKey(string $alternate): string
+    {
+        return hash('sha256', $alternate);
+    }
+
+    /**
+     * One KV getAll. Presence records as stored, with sessionId filled from the
+     * key when the JSON omitted it.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function listPresence(): array
+    {
+        $sessions = [];
+
+        foreach ($this->bucket()->getAll() as $entry) {
+            if ($entry->key === '' || ! is_string($entry->value) || $entry->value === '') {
+                continue;
+            }
+
+            $decoded = json_decode($entry->value, true);
+
+            if (! is_array($decoded)) {
+                $sessions[] = ['sessionId' => $entry->key];
+
+                continue;
+            }
+
+            if (! isset($decoded['sessionId']) || ! is_string($decoded['sessionId']) || $decoded['sessionId'] === '') {
+                $decoded['sessionId'] = $entry->key;
+            }
+
+            $sessions[] = $decoded;
+        }
+
+        return $sessions;
+    }
+
+    /**
      * @return list<string>
      */
     public function listSessionIds(): array
@@ -190,13 +295,17 @@ class NatsBus
             $consumer->getConfiguration()
                 ->setSubjectFilter('session.*.inbox')
                 ->setDeliverPolicy(DeliverPolicy::NEW)
-                ->setAckPolicy(AckPolicy::EXPLICIT);
+                ->setAckPolicy(AckPolicy::EXPLICIT)
+                ->setAckWait(60_000_000_000);
             $consumer->create();
+        } elseif ($consumer->getConfiguration()->getAckWait() !== 60_000_000_000) {
+            $consumer->getConfiguration()->setAckWait(60_000_000_000);
+            $consumer->create(false);
         }
     }
 
     /**
-     * Pull one inbox batch. Unknown sessions are acked (dropped) by the caller returning normally.
+     * Pull one inbox batch. Failures are retried or recorded before acknowledgement.
      *
      * @param  callable(string, string): void  $handler
      */
@@ -204,18 +313,30 @@ class NatsBus
     {
         $this->ensureInboxConsumer();
 
-        $batch = (int) config('agent_bus.sidecar.batch', 8);
         $expires = (float) config('agent_bus.sidecar.expires', 0.5);
 
         $consumer = $this->stream()->getConsumer($this->sidecarConsumerName());
-        $consumer->setIterations(max(1, $iterations));
-        $consumer->setBatching(max(1, $batch));
+        $consumer->setBatching(1);
         $consumer->setExpires($expires > 0 ? $expires : 0.5);
 
-        return $consumer->handle(function (Payload $payload) use ($handler): void {
-            $subject = is_string($payload->subject) ? $payload->subject : '';
-            $handler($subject, $payload->body);
-        });
+        $processed = 0;
+        $delivery = new InboxDelivery($this);
+        for ($iteration = 0; $iteration < max(1, $iterations); $iteration++) {
+            // Fetch one at a time: a slow prompt must not age other messages' leases.
+            $queue = $consumer->getQueue();
+            try {
+                foreach ($queue->fetchAll(1) as $message) {
+                    if (! $message->payload->isEmpty()) {
+                        $delivery->handle($message, $handler);
+                        $processed++;
+                    }
+                }
+            } finally {
+                $consumer->client->unsubscribe($queue);
+            }
+        }
+
+        return $processed;
     }
 
     public function monitorConsumerName(): string
@@ -324,5 +445,10 @@ class NatsBus
     private function bucket(): Bucket
     {
         return $this->nats->jetstream()->api()->getBucket($this->kvBucket());
+    }
+
+    private function aliasBucket(): Bucket
+    {
+        return $this->nats->jetstream()->api()->getBucket($this->aliasesBucket());
     }
 }
