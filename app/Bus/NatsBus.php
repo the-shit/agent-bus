@@ -246,7 +246,7 @@ class NatsBus
      * Pull one batch of bus envelopes from every subject and hand each to the handler.
      * Invalid payloads are acked (skipped) by the caller returning normally.
      *
-     * @param  callable(string, array<string, mixed>): void  $handler
+     * @param  callable(string, array<string, mixed>, ?int): void  $handler
      */
     public function consumeMonitor(callable $handler, int $iterations = 1): int
     {
@@ -260,10 +260,10 @@ class NatsBus
         $consumer->setBatching(max(1, $batch));
         $consumer->setExpires($expires > 0 ? $expires : 0.5);
 
-        return $consumer->handle(function (Payload $payload) use ($handler): void {
+        return $consumer->handle(function (Payload $payload, string $replyTo) use ($handler): void {
             $subject = is_string($payload->subject) ? $payload->subject : '';
             $body = is_string($payload->body) ? $payload->body : '';
-            $handler($subject, $this->decodeEnvelope($body));
+            $handler($subject, $this->decodeEnvelope($body), $this->streamSeqFromReplyTo($replyTo));
         });
     }
 
@@ -277,6 +277,31 @@ class NatsBus
         $envelope = json_decode($payload, true);
 
         return is_array($envelope) ? $envelope : [];
+    }
+
+    private function streamSeqFromReplyTo(?string $replyTo): ?int
+    {
+        if ($replyTo === null || $replyTo === '') {
+            return null;
+        }
+
+        if (! str_starts_with($replyTo, '$JS.ACK.')) {
+            return null;
+        }
+
+        $tokens = explode('.', $replyTo);
+
+        // Old format: \$JS.ACK.\u003cstream\u003e.\u003cconsumer\u003e.\u003credeliveryCount\u003e.\u003cstreamSeq\u003e.\u003cdeliverySequence\u003e.\u003ctimestamp\u003e.\u003cpending\u003e
+        // (9 tokens). New format adds domain + account hash at positions 2–3.
+        if (count($tokens) === 9) {
+            array_splice($tokens, 2, 0, ['', '']);
+        }
+
+        if (count($tokens) < 11) {
+            return null;
+        }
+
+        return is_numeric($tokens[7]) ? (int) $tokens[7] : null;
     }
 
     private function hostScopedConsumerName(string $prefix): string

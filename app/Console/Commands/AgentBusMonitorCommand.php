@@ -4,6 +4,8 @@ namespace App\Console\Commands;
 
 use App\Bus\NatsBus;
 use App\Events\BusEnvelopeBroadcast;
+use App\Models\BusEvent;
+use Carbon\Carbon;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
@@ -46,12 +48,29 @@ class AgentBusMonitorCommand extends Command
 
         do {
             try {
-                $count = $bus->consumeMonitor(function (string $subject, array $envelope): void {
+                $count = $bus->consumeMonitor(function (string $subject, array $envelope, ?int $seq): void {
                     if ($envelope === []) {
                         return;
                     }
 
                     broadcast(new BusEnvelopeBroadcast($envelope));
+
+                    $attributes = [
+                        'subject' => $subject,
+                        'session_id' => $envelope['sessionId'] ?? null,
+                        'agent_type' => $envelope['agentType'] ?? null,
+                        'model' => $envelope['model'] ?? null,
+                        'repo' => $envelope['repo'] ?? null,
+                        'type' => $envelope['type'] ?? 'unknown',
+                        'payload' => $envelope['payload'] ?? [],
+                        'occurred_at' => isset($envelope['timestamp']) ? Carbon::parse($envelope['timestamp']) : null,
+                    ];
+
+                    if ($seq !== null) {
+                        BusEvent::updateOrCreate(['seq' => $seq], $attributes);
+                    } else {
+                        BusEvent::create($attributes);
+                    }
 
                     $this->line('bridged '.($envelope['type'] ?? '?').' on '.$subject);
                 });
