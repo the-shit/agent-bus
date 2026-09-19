@@ -21,17 +21,18 @@ it('exits 0 with one stderr line when the music connector cannot reach the spoti
             ['music', '--once', '--file='.$file],
             ['NATS_URL' => 'nats://127.0.0.1:1'],
         );
+
+        expect($result->exitCode())->toBe(0)
+            ->and($result->output())->toBe('')
+            ->and(musicConnectorStderrLines($result))->toHaveCount(1)
+            ->and($result->errorOutput())
+            ->not->toContain('Stack trace')
+            ->not->toContain('Illuminate\\')
+            ->not->toContain('artisan')
+            ->and(is_file($file.'.offset'))->toBeFalse();
     } finally {
         musicCleanupJsonl($file);
     }
-
-    expect($result->exitCode())->toBe(0)
-        ->and($result->output())->toBe('')
-        ->and(musicConnectorStderrLines($result))->toHaveCount(1)
-        ->and($result->errorOutput())
-        ->not->toContain('Stack trace')
-        ->not->toContain('Illuminate\\')
-        ->not->toContain('artisan');
 });
 
 it('boards one music JSONL line onto spotify.> as envelope v2', function () {
@@ -42,25 +43,27 @@ it('boards one music JSONL line onto spotify.> as envelope v2', function () {
 
     try {
         $result = musicConnectorCli(['music', '--once', '--file='.$file]);
+
+        expect($result->exitCode())->toBe(0)
+            ->and($result->errorOutput())->toBe('')
+            ->and(is_file($file.'.offset'))->toBeTrue()
+            ->and((int) file_get_contents($file.'.offset'))->toBe(filesize($file));
+
+        $envelope = $bus->lastEnvelope('spotify.track.changed');
+
+        expect($envelope)
+            ->toHaveKeys(['v', 'agentType', 'repo', 'type', 'timestamp', 'payload'])
+            ->and($envelope['v'])->toBe(2)
+            ->and($envelope['agentType'])->toBe('music')
+            ->and($envelope['sessionId'])->toBe('')
+            ->and($envelope['repo'])->toBe('the-shit/music')
+            ->and($envelope['type'])->toBe('track.changed')
+            ->and($envelope['payload']['track'])->toBe('Never Gonna Give You Up')
+            ->and($envelope['payload']['artist'])->toBe('Rick Astley')
+            ->and($envelope['payload']['uri'])->toBe('spotify:track:4PTG3Z6ehGkBFwjybzWkR8');
     } finally {
         musicCleanupJsonl($file);
     }
-
-    expect($result->exitCode())->toBe(0)
-        ->and($result->errorOutput())->toBe('');
-
-    $envelope = $bus->lastEnvelope('spotify.track.changed');
-
-    expect($envelope)
-        ->toHaveKeys(['v', 'agentType', 'repo', 'type', 'timestamp', 'payload'])
-        ->and($envelope['v'])->toBe(2)
-        ->and($envelope['agentType'])->toBe('music')
-        ->and($envelope['sessionId'])->toBe('')
-        ->and($envelope['repo'])->toBe('the-shit/music')
-        ->and($envelope['type'])->toBe('track.changed')
-        ->and($envelope['payload']['track'])->toBe('Never Gonna Give You Up')
-        ->and($envelope['payload']['artist'])->toBe('Rick Astley')
-        ->and($envelope['payload']['uri'])->toBe('spotify:track:4PTG3Z6ehGkBFwjybzWkR8');
 })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
 /**
