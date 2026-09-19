@@ -50,8 +50,12 @@ it('drops music JSONL lines that are not a boardable spotify event', function ()
 });
 
 it('keeps the music connector off the spotify hot path', function () {
+    $root = dirname(__DIR__, 3);
+
     expect(Cli::HOT_VERBS)->not->toContain('music')
-        ->and(Cli::HOT_VERBS)->not->toContain('spotify');
+        ->and(Cli::HOT_VERBS)->not->toContain('spotify')
+        ->and(file_exists($root.'/app/Music/SpotifyCapture.php'))->toBeFalse()
+        ->and(file_exists($root.'/bin/spotify-bus-connector'))->toBeFalse();
 });
 
 /**
