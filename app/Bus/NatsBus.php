@@ -236,7 +236,7 @@ class NatsBus
         if (! $consumer->exists()) {
             $consumer->getConfiguration()
                 ->setSubjectFilters($this->subjects())
-                ->setDeliverPolicy(DeliverPolicy::ALL)
+                ->setDeliverPolicy(DeliverPolicy::NEW)
                 ->setAckPolicy(AckPolicy::EXPLICIT);
             $consumer->create();
         }

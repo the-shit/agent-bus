@@ -1,19 +1,16 @@
 <?php
 
-namespace App\Console\Commands;
+namespace App\Commands;
 
 use App\Bus\NatsBus;
-use App\Events\BusEnvelopeBroadcast;
-use App\Models\BusEvent;
-use Carbon\Carbon;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
-use Illuminate\Console\Command;
 use Illuminate\Support\Sleep;
+use LaravelZero\Framework\Commands\Command;
 use Throwable;
 
-#[Signature('agent-bus:monitor {--once : Broadcast one batch of backed-up envelopes and exit}')]
-#[Description('Forward AGENT_BUS envelopes from JetStream to dashboard browsers')]
+#[Signature('monitor {--once : Print one batch of envelopes and exit}')]
+#[Description('Print AGENT_BUS envelopes from JetStream to stdout')]
 class AgentBusMonitorCommand extends Command
 {
     /**
@@ -48,28 +45,9 @@ class AgentBusMonitorCommand extends Command
 
         do {
             try {
-                $count = $bus->consumeMonitor(function (string $subject, array $envelope, ?int $seq): void {
+                $count = $bus->consumeMonitor(function (string $subject, array $envelope): void {
                     if ($envelope === []) {
                         return;
-                    }
-
-                    broadcast(new BusEnvelopeBroadcast($envelope));
-
-                    $attributes = [
-                        'subject' => $subject,
-                        'session_id' => $envelope['sessionId'] ?? null,
-                        'agent_type' => $envelope['agentType'] ?? null,
-                        'model' => $envelope['model'] ?? null,
-                        'repo' => $envelope['repo'] ?? null,
-                        'type' => $envelope['type'] ?? 'unknown',
-                        'payload' => $envelope['payload'] ?? [],
-                        'occurred_at' => isset($envelope['timestamp']) ? Carbon::parse($envelope['timestamp']) : null,
-                    ];
-
-                    if ($seq !== null) {
-                        BusEvent::updateOrCreate(['seq' => $seq], $attributes);
-                    } else {
-                        BusEvent::create($attributes);
                     }
 
                     $this->line('bridged '.($envelope['type'] ?? '?').' on '.$subject);
