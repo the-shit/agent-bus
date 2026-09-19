@@ -24,6 +24,12 @@ it('runs the monitor off the one binary', function () {
         ->toContain('monitor');
 });
 
+it('names the monitor consumer from config', function () {
+    config(['agent_bus.monitor.consumer' => 'monitor-from-config']);
+
+    expect(app(NatsBus::class)->monitorConsumerName())->toBe('monitor-from-config');
+});
+
 it('prints a published envelope on stdout', function () {
     $token = bin2hex(random_bytes(4));
     $type = 'monitorProve'.$token;
@@ -38,7 +44,11 @@ it('prints a published envelope on stdout', function () {
         'payload' => ['tool' => 'run_terminal_command'],
     ];
 
-    config(['agent_bus.monitor.consumer' => 'monitor-test-'.$token]);
+    config([
+        'agent_bus.monitor.consumer' => 'monitor-test-'.$token,
+        'agent_bus.monitor.batch' => 1,
+        'agent_bus.monitor.expires' => 0.5,
+    ]);
 
     $bus = app(NatsBus::class);
     $bus->provision();
@@ -48,4 +58,35 @@ it('prints a published envelope on stdout', function () {
     $this->artisan('monitor', ['--once' => true])
         ->expectsOutputToContain('bridged '.$type.' on '.$subject)
         ->assertSuccessful();
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+it('consumes a monitor batch using configured batch and expires', function () {
+    $token = bin2hex(random_bytes(4));
+    $consumer = 'monitor-batch-'.$token;
+    config([
+        'agent_bus.monitor.consumer' => $consumer,
+        'agent_bus.monitor.batch' => 2,
+        'agent_bus.monitor.expires' => 0.5,
+    ]);
+
+    $bus = app(NatsBus::class);
+    try {
+        $bus->provision();
+        $bus->ensureMonitorConsumer();
+
+        $bus->publishEnvelope('repo.the-shit.agent-bus.batch-a-'.$token, ['type' => 'a'.$token]);
+        $bus->publishEnvelope('repo.the-shit.agent-bus.batch-b-'.$token, ['type' => 'b'.$token]);
+
+        $types = [];
+        $count = $bus->consumeMonitor(function (string $subject, array $envelope) use (&$types): void {
+            $types[] = $envelope['type'] ?? '';
+        });
+
+        expect($count)->toBe(2)
+            ->and($types)->toContain('a'.$token)
+            ->and($types)->toContain('b'.$token);
+    } finally {
+        NatsV2::jetstream()->stream($bus->streamName())->getConsumer($consumer)->delete();
+        NatsV2::disconnectAll();
+    }
 })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
