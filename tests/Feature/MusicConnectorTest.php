@@ -14,10 +14,16 @@ it('lists spotify.> among stream subjects so music envelopes board', function ()
 });
 
 it('exits 0 with one stderr line when the music connector cannot reach the spotify broker', function () {
-    $result = musicConnectorCli(
-        ['music', '--once', '--file='.musicFixturePath()],
-        ['NATS_URL' => 'nats://127.0.0.1:1'],
-    );
+    $file = musicIsolatedJsonl();
+
+    try {
+        $result = musicConnectorCli(
+            ['music', '--once', '--file='.$file],
+            ['NATS_URL' => 'nats://127.0.0.1:1'],
+        );
+    } finally {
+        musicCleanupJsonl($file);
+    }
 
     expect($result->exitCode())->toBe(0)
         ->and($result->output())->toBe('')
@@ -32,7 +38,13 @@ it('boards one music JSONL line onto spotify.> as envelope v2', function () {
     $bus = app(NatsBus::class);
     $bus->provision();
 
-    $result = musicConnectorCli(['music', '--once', '--file='.musicFixturePath()]);
+    $file = musicIsolatedJsonl();
+
+    try {
+        $result = musicConnectorCli(['music', '--once', '--file='.$file]);
+    } finally {
+        musicCleanupJsonl($file);
+    }
 
     expect($result->exitCode())->toBe(0)
         ->and($result->errorOutput())->toBe('');
@@ -67,9 +79,26 @@ function musicConnectorCli(array $arguments, array $environment = []): ProcessRe
         ]);
 }
 
-function musicFixturePath(): string
+function musicIsolatedJsonl(): string
 {
-    return base_path('tests/Fixtures/music/spotify-track-changed.jsonl');
+    $dir = sys_get_temp_dir().'/agent-bus-music-'.bin2hex(random_bytes(4));
+    mkdir($dir, 0700, true);
+    $path = $dir.'/events.jsonl';
+    copy(base_path('tests/Fixtures/music/spotify-track-changed.jsonl'), $path);
+
+    return $path;
+}
+
+function musicCleanupJsonl(string $path): void
+{
+    @unlink($path);
+    @unlink($path.'.offset');
+
+    $dir = dirname($path);
+
+    if (is_dir($dir)) {
+        @rmdir($dir);
+    }
 }
 
 function musicConnectorStderrLines(ProcessResult $result): array
