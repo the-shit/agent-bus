@@ -4,6 +4,9 @@ namespace App\Bus;
 
 use Basis\Nats\Client;
 use Basis\Nats\Configuration;
+use Basis\Nats\Consumer\AckPolicy;
+use Basis\Nats\Consumer\DeliverPolicy;
+use Basis\Nats\Message\Payload;
 use InvalidArgumentException;
 use JsonException;
 use Throwable;
@@ -19,6 +22,7 @@ class Cli
     public const HOT_VERBS = [
         'emit',
         'send',
+        'inbox',
         'heartbeat',
         'session-end',
         'sessions',
@@ -79,6 +83,7 @@ class Cli
         return match ($command) {
             'emit' => $this->emit($options),
             'send' => $this->send($options),
+            'inbox' => $this->inbox($options),
             'heartbeat' => $this->heartbeat($options),
             'session-end' => $this->sessionEnd($options),
             'sessions' => $this->sessions($positionals, $options),
@@ -357,6 +362,99 @@ class Cli
     }
 
     /**
+     * Pull one addressed inbox message for this session. The session process
+     * owns delivery; a Herdr pane map is not required.
+     *
+     * Exit 0: printed one envelope. Exit 2: nothing waiting. Exit 1: closed.
+     *
+     * @param  array<string, string>  $options
+     */
+    private function inbox(array $options): int
+    {
+        $sessionId = $this->sessionId($options, required: true);
+        $agentType = $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE');
+        [$canonical] = $this->canonicalize($sessionId, $agentType);
+
+        try {
+            $resolved = $this->resolveOnBus($canonical);
+
+            if ($resolved === null) {
+                fwrite(STDERR, "session {$sessionId} is not on the bus\n");
+
+                return 1;
+            }
+
+            $this->requireSubjectSafe($resolved);
+
+            $envelope = $this->pullInbox($resolved);
+        } catch (InvalidArgumentException $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
+
+            return 1;
+        }
+
+        if ($envelope === null) {
+            return 2;
+        }
+
+        echo json_encode($envelope, JSON_THROW_ON_ERROR)."\n";
+
+        return 0;
+    }
+
+    /**
+     * Durable per-session pull consumer. Colons are valid in session ids and
+     * NATS subjects, not in consumer names.
+     */
+    public static function inboxConsumerName(string $sessionId): string
+    {
+        $safe = preg_replace('/[^A-Za-z0-9_-]/', '-', $sessionId) ?? 'session';
+
+        return 'agent-bus-inbox-'.$safe;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function pullInbox(string $sessionId): ?array
+    {
+        $consumer = $this->client()->getApi()->getStream($this->streamName())->getConsumer(self::inboxConsumerName($sessionId));
+
+        if (! $consumer->exists()) {
+            $consumer->getConfiguration()
+                ->setSubjectFilter('session.'.$sessionId.'.inbox')
+                ->setDeliverPolicy(DeliverPolicy::NEW)
+                ->setAckPolicy(AckPolicy::EXPLICIT);
+            $consumer->create();
+        }
+
+        $expires = getenv('AGENT_BUS_INBOX_EXPIRES');
+        $seconds = is_string($expires) ? (float) $expires : 0.0;
+        $consumer->setIterations(1);
+        $consumer->setBatching(1);
+        $consumer->setExpires($seconds > 0 ? $seconds : 0.5);
+
+        $got = null;
+        $consumer->handle(function (Payload $payload) use (&$got): void {
+            $decoded = json_decode($payload->body, true);
+            $got = is_array($decoded) ? $decoded : ['raw' => $payload->body];
+        });
+
+        return $got;
+    }
+
+    private function deleteInboxConsumer(string $sessionId): void
+    {
+        $consumer = $this->client()->getApi()->getStream($this->streamName())->getConsumer(self::inboxConsumerName($sessionId));
+
+        if ($consumer->exists()) {
+            $consumer->delete();
+        }
+    }
+
+    /**
      * @param  array<string, string>  $options
      */
     private function heartbeat(array $options): int
@@ -534,6 +632,11 @@ class Cli
         try {
             $resolved = $this->resolveOnBus($canonical) ?? $canonical;
             $this->requireSubjectSafe($resolved);
+            try {
+                $this->deleteInboxConsumer($resolved);
+            } catch (Throwable) {
+                // Presence delete still wins; leftover consumers are idle.
+            }
             $this->deleteSession($resolved);
         } catch (Throwable $exception) {
             fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
@@ -870,6 +973,7 @@ class Cli
 Usage:
   bin/agent-bus emit --type=<type> --agent-type=<name> [--payload=<json>] [--session=<id>] [--model=<name>]
   bin/agent-bus send --session=<id-or-alias> --payload=<json>
+  bin/agent-bus inbox --session=<id-or-alias>
   bin/agent-bus heartbeat --session=<id> [--agent-type=<name>] [--model=<name>]
   bin/agent-bus session-end --session=<id-or-alias>
   bin/agent-bus sessions [--ids]

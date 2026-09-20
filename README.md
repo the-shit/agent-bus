@@ -50,7 +50,7 @@ Stay local: `phase_changed`, permission chatter, MCP connect, token stream, the 
 Hooks already get `sessionId`, `cwd`, `toolName` on stdin. `agent-bus emit`
 publishes. The framework does not boot on every tool call.
 
-- **Send:** MCP/CLI `send` publishes to `session.{id}.inbox`. A host sidecar subscribed to *this* session injects into the target (Herdr `agent prompt` for Grok). Prove: two agents, one send, the other turn starts with the JSON. No paste.
+- **Send:** MCP/CLI `send` publishes to `session.{id}.inbox`. The receiving session pulls with `inbox --session=<id>` (hot path). A Herdr host sidecar is an optional adapter for agents that cannot pull themselves, not the delivery path. Prove: two agents, neither in a mux, `send` then `inbox` prints the JSON. No paste. No pane map.
 - **First clients:** Grok Build and OpenCode.
 
 ## First four
@@ -58,7 +58,7 @@ publishes. The framework does not boot on every tool call.
 1. **Stand JetStream + KV** — this compose file, stream `AGENT_BUS`, KV `sessions`. Done when `nats stream info` and `nats kv get sessions <id>` work from two terminals.
 2. **Hook capture allowlist** — global Grok hooks → `agent-bus emit`. Done when a PostToolUse for Composer shows one `toolCall` on the stream and `phase_changed` does not.
 3. **Presence MCP** — `list_sessions` / `get_session` read KV. Done when this pane's session appears after SessionStart and vanishes after SessionEnd.
-4. **Addressed inbox** — MCP `send` + sidecar. Done when a second agent receives a JSON ping with no paste.
+4. **Addressed inbox** — MCP/CLI `send` + the target session's `inbox` pull. Done when a second agent receives a JSON ping with no paste and no Herdr pane.
 
 ## Not this
 
@@ -104,7 +104,7 @@ checkout, PHP 8.4:
 
 | Path | Verbs | Cost |
 |---|---|---|
-| Hot | `emit` `send` `heartbeat` `session-end` `sessions` `hook` `opencode` | 66 ms |
+| Hot | `emit` `send` `inbox` `heartbeat` `session-end` `sessions` `hook` `opencode` | 66 ms |
 | Cold | `provision` `sidecar` `app:build` | 150 ms |
 
 A test runs every hot verb in a subprocess and fails if a single framework class
@@ -149,9 +149,26 @@ To board every Grok session on the machine, copy `hooks/grok.json` to `~/.grok/h
 
 Heartbeat PUTs presence JSON (`sessionId`, `agentType`, `repo`, `lastSeen`). `sessions` lists the id. Stop heartbeats: the KV key is gone within 90s. `sessionEnd` deletes immediately.
 
+## Session inbox
+
+The session process owns delivery. Presence is KV. Address is `session.{id}.inbox`. Pull is:
+
+```bash
+bin/agent-bus inbox --session <id>
+```
+
+Exit 0 prints one envelope. Exit 2 means nothing waiting. Exit 1 is closed (unknown session or broker down). Each session gets a durable consumer `agent-bus-inbox-{id}` with colons folded to dashes, deliver-new, ack-explicit. `session-end` deletes that consumer.
+
+Clients (Pi, Grok, OpenCode) poll or block on `inbox`. They do not have to live in a mux or be assigned a room.
+
+```bash
+bin/agent-bus send --session <B> --payload '{"text":"ping"}'
+bin/agent-bus inbox --session <B>
+```
+
 ## Host sidecar
 
-One process per host. It maps Grok session ids from `herdr agent list` (`agent_session.value` → `pane_id`) onto KV `sessions`, then injects inbox JSON with `herdr agent prompt` so the **model** sees it. No paste. No markdown drop. No `wtype`.
+Optional. For agents that cannot pull, one process per host maps Grok session ids from `herdr agent list` (`agent_session.value` → `pane_id`) onto KV `sessions`, then injects inbox JSON with `herdr agent prompt`. No paste. No markdown drop. No `wtype`. Do not treat this as the product path.
 
 ```bash
 bin/agent-bus provision
