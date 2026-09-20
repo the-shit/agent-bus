@@ -144,6 +144,55 @@ describe('send', function () {
     })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
 
+describe('inbox', function () {
+    it('exits 1 when the session is missing from KV', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $sessionId = 'cli-inbox-missing-'.bin2hex(random_bytes(4));
+        $result = agentBusCli(['inbox', '--session='.$sessionId]);
+
+        expect($result->exitCode())->toBe(1)
+            ->and($result->errorOutput())->toContain("session {$sessionId} is not on the bus");
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+    it('pulls a send without a Herdr pane', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $sessionId = 'cli-inbox-'.bin2hex(random_bytes(4));
+        $bus->putSession($sessionId, json_encode(['sessionId' => $sessionId], JSON_THROW_ON_ERROR));
+
+        $empty = agentBusCli(
+            ['inbox', '--session='.$sessionId],
+            ['AGENT_BUS_INBOX_EXPIRES' => '0.2'],
+        );
+
+        expect($empty->exitCode())->toBe(2)
+            ->and($empty->output())->toBe('');
+
+        $sent = agentBusCli([
+            'send',
+            '--session='.$sessionId,
+            '--payload={"text":"walnut halves remember the river"}',
+        ]);
+
+        expect($sent->exitCode())->toBe(0);
+
+        $got = agentBusCli(
+            ['inbox', '--session='.$sessionId],
+            ['AGENT_BUS_INBOX_EXPIRES' => '0.5'],
+        );
+
+        $printed = json_decode($got->output(), true);
+
+        expect($got->exitCode())->toBe(0)
+            ->and($printed['payload'])->toBe(['text' => 'walnut halves remember the river']);
+
+        $bus->deleteSession($sessionId);
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+});
+
 describe('heartbeat and sessions', function () {
     it('puts presence JSON in KV', function () {
         $bus = app(NatsBus::class);
@@ -532,6 +581,8 @@ describe('hot path', function () {
         'heartbeat' => ['heartbeat --session=probe'],
         'session-end' => ['session-end --session=probe'],
         'sessions' => ['sessions'],
+        'send' => ['send --session=probe --payload={}'],
+        'inbox' => ['inbox --session=probe'],
         'hook' => ['hook'],
         'opencode' => ['opencode'],
     ]);
@@ -544,7 +595,7 @@ describe('hot path', function () {
             ->not->toContain('wrangler')
             ->not->toContain('DurableObject')
             ->and(Cli::HOT_VERBS)
-            ->toContain('emit', 'send', 'heartbeat', 'session-end', 'sessions', 'hook', 'opencode');
+            ->toContain('emit', 'send', 'inbox', 'heartbeat', 'session-end', 'sessions', 'hook', 'opencode');
     });
 });
 

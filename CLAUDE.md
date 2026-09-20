@@ -11,7 +11,7 @@ whole performance design.
 
 | Path | Verbs | Boots | Cost |
 |---|---|---|---|
-| Hot | `emit` `send` `heartbeat` `session-end` `sessions` `hook` `opencode` | Composer autoload only | ~66 ms |
+| Hot | `emit` `send` `inbox` `heartbeat` `session-end` `sessions` `hook` `opencode` | Composer autoload only | ~66 ms |
 | Cold | `provision` `sidecar` `app:build` | Laravel Zero kernel | ~150 ms |
 
 Hot verbs fire from harness hooks on **every tool call**. They must never boot
