@@ -248,7 +248,14 @@ class Cli
 
     private function putSession(string $id, string $json): void
     {
-        $this->client()->getApi()->getBucket($this->kvBucket())->put($id, $json);
+        $bucket = $this->client()->getApi()->getBucket($this->kvBucket());
+        $ttlSeconds = (int) getenv('AGENT_BUS_KV_TTL');
+        $ttlSeconds = $ttlSeconds > 0 ? $ttlSeconds : 90;
+        $bucket->getConfiguration()->setTtl($ttlSeconds);
+        $stream = $bucket->getStream();
+        $bucket->getConfiguration()->configureStream($stream->getConfiguration());
+        $stream->update();
+        $bucket->put($id, $json);
     }
 
     /**

@@ -3,11 +3,6 @@
 
 require __DIR__.'/../vendor/autoload.php';
 
-use Basis\Nats\Client;
-use Basis\Nats\Configuration;
-use Closure;
-use RuntimeException;
-
 $input = file_get_contents('php://stdin');
 
 if ($input === false) {
@@ -51,6 +46,7 @@ if (getenv('AGENT_BUS_MODEL')) {
 }
 
 runAgentBus($options, $env);
+runAgentBusHeartbeat($options, $env);
 
 exit(0);
 
@@ -87,4 +83,26 @@ function formatOptions(array $options): array
     }
 
     return $formatted;
+}
+
+function runAgentBusHeartbeat(array $options, array $env): void
+{
+    $process = proc_open(
+        [PHP_BINARY, __DIR__.'/../bin/agent-bus', 'heartbeat', ...formatOptions($options)],
+        [
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $pipes,
+        null,
+        $env,
+    );
+
+    if (! is_resource($process)) {
+        exit(0);
+    }
+
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    proc_close($process);
 }

@@ -80,8 +80,12 @@ class NatsBus
         $bucket = $this->bucket();
         $bucket->getConfiguration()
             ->setHistory($history)
-            ->setTtl($ttlSeconds * 1_000_000_000);
-        $bucket->getStream();
+            ->setTtl($ttlSeconds);
+        $stream = $bucket->getStream();
+        if ($stream->exists()) {
+            $bucket->getConfiguration()->configureStream($stream->getConfiguration());
+            $stream->update();
+        }
     }
 
     public function streamExists(): bool

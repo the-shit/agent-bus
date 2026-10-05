@@ -40,7 +40,8 @@ Two agents on the same machine still work like strangers. You copy a path into c
 
 | On the bus | Hook | Why |
 |---|---|---|
-| `sessionStart` / `sessionEnd` | SessionStart / SessionEnd | node join / leave |
+| `sessionStart` | SessionStart | node join |
+| `sessionEnd` | SessionEnd | node leave, KV cleanup |
 | `toolCall` | PostToolUse | subscribe to a tool |
 | `idle` | Notification `idle_prompt` + Stop | subscribe to ready |
 | `errorRaised` | PostToolUseFailure / StopFailure | page a peer |
@@ -67,6 +68,8 @@ Grok will call these when its events fire.
 2. **Hook capture allowlist** — global Grok hooks → `agent-bus emit`. Done when a PostToolUse for Composer shows one `toolCall` on the stream and `phase_changed` does not.
 3. **Presence MCP** — `list_sessions` / `get_session` read KV. Done when this pane's session appears after SessionStart and vanishes after SessionEnd.
 4. **Addressed inbox** — MCP `send` + sidecar. Done when a second agent receives a JSON ping with no paste.
+
+**Note:** SessionEnd hooks delete the session from KV immediately. The 90s TTL is a safety net, not the deletion mechanism.
 
 ## Not this
 
