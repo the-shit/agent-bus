@@ -1,0 +1,94 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * Spotify-to-Bus connector
+ * Tails events.jsonl and publishes to agent-bus NATS
+ */
+
+declare(strict_types=1);
+
+require __DIR__.'/../vendor/autoload.php';
+
+use Basis\Nats\Client;
+use Basis\Nats\Configuration;
+use Illuminate\Support\Str;
+
+// Config
+$eventsFile = $_SERVER['HOME'].'/.config/spotify-cli/events.jsonl';
+$offsetFile = $_SERVER['HOME'].'/.config/spotify-cli/spotify-bus.offset';
+$natsHost = '127.0.0.1';
+$natsPort = 4222;
+
+// Connect to NATS
+$configuration = new Configuration(host: $natsHost, port: $natsPort);
+$nats = new Client(configuration: $configuration);
+
+// Initialize
+$offset = file_exists($offsetFile) ? (int) file_get_contents($offsetFile) : 0;
+$handle = fopen($eventsFile, 'r');
+
+if ($handle === false) {
+    fwrite(STDERR, "Cannot open: $eventsFile\n");
+    exit(1);
+}
+
+fseek($handle, $offset);
+
+echo "[spotify-bus] Connected to NATS ($natsHost:$natsPort)\n";
+echo "[spotify-bus] Tail: $eventsFile\n";
+echo "[spotify-bus] Press Ctrl+C to stop\n\n";
+
+$running = true;
+if (function_exists('pcntl_signal')) {
+    pcntl_signal(SIGINT, fn() => $running = false);
+}
+
+try {
+    while ($running) {
+        $line = fgets($handle);
+        
+        if ($line === false) {
+            usleep(500000);
+            continue;
+        }
+
+        $line = trim($line);
+        if ($line === '') {
+            continue;
+        }
+
+        $event = json_decode($line, true);
+        if ($event === null) {
+            fwrite(STDERR, "[spotify-bus] Invalid JSON: $line\n");
+            continue;
+        }
+
+        // Build bus envelope
+        $payload = json_encode([
+            'type' => 'music.spotify',
+            'payload' => $event,
+            'source' => 'the-shit/music',
+            'timestamp' => $event['timestamp'] ?? date('c'),
+        ]);
+
+        // Publish with subject based on event type (remove duplicate "spotify" prefix)
+        $eventName = $event['event'] ?? 'unknown';
+        // Remove "spotify." prefix if present to avoid "spotify.spotify."
+        if (str_starts_with($eventName, 'spotify.')) {
+            $eventName = substr($eventName, 8);
+        }
+        $subject = "spotify.".Str::snake($eventName);
+
+        $nats->publish($subject, new Basis\Nats\Message\Payload($payload));
+        
+        echo "[spotify-bus] $subject\n";
+
+        // Update offset
+        $offset = ftell($handle);
+        file_put_contents($offsetFile, (string) $offset);
+    }
+} finally {
+    fclose($handle);
+    $nats->close();
+}

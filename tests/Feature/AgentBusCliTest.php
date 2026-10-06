@@ -144,6 +144,122 @@ describe('send', function () {
     })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
 
+describe('inbox', function () {
+    it('exits 1 when the session is missing from KV', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $sessionId = 'cli-inbox-missing-'.bin2hex(random_bytes(4));
+        $result = agentBusCli(['inbox', '--session='.$sessionId]);
+
+        expect($result->exitCode())->toBe(1)
+            ->and($result->errorOutput())->toContain("session {$sessionId} is not on the bus");
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+    it('pulls a send without a Herdr pane', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $sessionId = 'cli-inbox-'.bin2hex(random_bytes(4));
+        $bus->putSession($sessionId, json_encode(['sessionId' => $sessionId], JSON_THROW_ON_ERROR));
+
+        $empty = agentBusCli(
+            ['inbox', '--session='.$sessionId],
+            ['AGENT_BUS_INBOX_EXPIRES' => '0.2'],
+        );
+
+        expect($empty->exitCode())->toBe(2)
+            ->and($empty->output())->toBe('');
+
+        $sent = agentBusCli([
+            'send',
+            '--session='.$sessionId,
+            '--payload={"text":"walnut halves remember the river"}',
+        ]);
+
+        expect($sent->exitCode())->toBe(0);
+
+        $got = agentBusCli(
+            ['inbox', '--session='.$sessionId],
+            ['AGENT_BUS_INBOX_EXPIRES' => '0.5'],
+        );
+        $printed = json_decode($got->output(), true);
+
+        expect($got->exitCode())->toBe(0)
+            ->and($printed['payload'])->toBe(['text' => 'walnut halves remember the river']);
+
+        $bus->deleteSession($sessionId);
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+});
+
+describe('capability work', function () {
+    it('publishes a correlated request and result on capability subjects', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $requested = agentBusCli([
+            'work-request',
+            '--capability=code_review',
+            '--agent-type=pi',
+            '--session=pi:requester',
+            '--payload={"repo":"the-shit/agent-bus"}',
+        ]);
+        $requestEnvelope = json_decode($requested->output(), true);
+        $requestId = $requestEnvelope['payload']['requestId'];
+
+        expect($requested->exitCode())->toBe(0)
+            ->and($requestEnvelope['payload']['capability'])->toBe('code_review')
+            ->and($bus->lastEnvelope('work.request.code_review.'.$requestId))->toBe($requestEnvelope);
+
+        $result = agentBusCli([
+            'work-result',
+            '--request='.$requestId,
+            '--status=ok',
+            '--agent-type=pi',
+            '--session=pi:reviewer',
+            '--payload={"verdict":"approve"}',
+        ]);
+        $resultEnvelope = json_decode($result->output(), true);
+
+        expect($result->exitCode())->toBe(0)
+            ->and($resultEnvelope['payload']['requestId'])->toBe($requestId)
+            ->and($resultEnvelope['payload']['result'])->toBe(['verdict' => 'approve'])
+            ->and($bus->lastEnvelope('work.result.'.$requestId))->toBe($resultEnvelope);
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+    it('advertises worker capabilities in presence', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+        $sessionId = 'pi:capability-'.bin2hex(random_bytes(4));
+
+        $heartbeat = agentBusCli([
+            'heartbeat',
+            '--session='.$sessionId,
+            '--agent-type=pi',
+            '--capabilities=code_review,game_build,code_review',
+        ]);
+        $presence = json_decode($heartbeat->output(), true);
+
+        agentBusCli([
+            'heartbeat',
+            '--session='.$sessionId,
+            '--agent-type=pi',
+            '--capabilities=code_review,game_build',
+        ]);
+        $listed = json_decode(agentBusCli(['sessions'])->output(), true);
+        $matches = array_values(array_filter(
+            $listed,
+            fn (mixed $row): bool => is_array($row) && ($row['sessionId'] ?? null) === $sessionId,
+        ));
+
+        expect($heartbeat->exitCode())->toBe(0)
+            ->and($presence['capabilities'])->toBe(['code_review', 'game_build'])
+            ->and($matches)->toHaveCount(1);
+
+        $bus->deleteSession($sessionId);
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+});
+
 describe('heartbeat and sessions', function () {
     it('puts presence JSON in KV', function () {
         $bus = app(NatsBus::class);
@@ -532,6 +648,9 @@ describe('hot path', function () {
         'heartbeat' => ['heartbeat --session=probe'],
         'session-end' => ['session-end --session=probe'],
         'sessions' => ['sessions'],
+        'work-request' => ['work-request --capability=tool_failure_triage --agent-type=probe --payload={}'],
+        'work-result' => ['work-result --request=probe --agent-type=probe --payload={}'],
+        'inbox' => ['inbox --session=probe'],
         'hook' => ['hook'],
         'opencode' => ['opencode'],
     ]);
@@ -544,7 +663,7 @@ describe('hot path', function () {
             ->not->toContain('wrangler')
             ->not->toContain('DurableObject')
             ->and(Cli::HOT_VERBS)
-            ->toContain('emit', 'send', 'heartbeat', 'session-end', 'sessions', 'hook', 'opencode');
+            ->toContain('emit', 'send', 'inbox', 'heartbeat', 'session-end', 'sessions', 'work-request', 'work-result', 'hook', 'opencode');
     });
 });
 

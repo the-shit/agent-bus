@@ -1,0 +1,19 @@
+services:
+  nats:
+    image: nats@sha256:ad7a43eb7e3337c3c38ce5d784d1461791f95f730f252d2b25eee699752a0ca3
+    container_name: nats
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    restart: unless-stopped
+    ports:
+      - "${AGENT_BUS_NATS_BIND:-10.0.3.198}:4222:4222"
+      - "127.0.0.1:8222:8222"
+    volumes:
+      - "${AGENT_BUS_NATS_DATA:-/home/jordan/.local/share/agent-bus/nats}:/data"
+      - "${AGENT_BUS_NATS_CONFIG:-/home/jordan/.config/agent-bus/nats}:/etc/nats:ro"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+

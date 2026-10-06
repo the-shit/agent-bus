@@ -4,6 +4,9 @@ namespace App\Bus;
 
 use Basis\Nats\Client;
 use Basis\Nats\Configuration;
+use Basis\Nats\Consumer\AckPolicy;
+use Basis\Nats\Consumer\DeliverPolicy;
+use Basis\Nats\Message\Payload;
 use InvalidArgumentException;
 use JsonException;
 use Throwable;
@@ -19,9 +22,12 @@ class Cli
     public const HOT_VERBS = [
         'emit',
         'send',
+        'inbox',
         'heartbeat',
         'session-end',
         'sessions',
+        'work-request',
+        'work-result',
         'hook',
         'opencode',
     ];
@@ -79,9 +85,12 @@ class Cli
         return match ($command) {
             'emit' => $this->emit($options),
             'send' => $this->send($options),
+            'inbox' => $this->inbox($options),
             'heartbeat' => $this->heartbeat($options),
             'session-end' => $this->sessionEnd($options),
             'sessions' => $this->sessions($positionals, $options),
+            'work-request' => $this->workRequest($options),
+            'work-result' => $this->workResult($options),
             'hook' => $this->fromStdin(GrokHook::class),
             'opencode' => $this->fromStdin(OpenCodeCapture::class),
             default => $this->usage(),
@@ -293,6 +302,10 @@ class Cli
 
     private function aliasTarget(string $id): ?string
     {
+        if (! $this->bucketExists($this->aliasBucketName())) {
+            return null;
+        }
+
         $value = $this->client()->getApi()->getBucket($this->aliasBucketName())->get($this->aliasKey($id));
 
         if (! is_string($value) || $value === '') {
@@ -357,6 +370,235 @@ class Cli
     }
 
     /**
+     * Publish an advisory judgment request without booting the framework.
+     *
+     * @param  array<string, string>  $options
+     */
+    private function workRequest(array $options): int
+    {
+        $capability = $this->capability($options['capability'] ?? '');
+        $requestId = bin2hex(random_bytes(16));
+        $task = $this->jsonObject($options['payload'] ?? '{}', 'payload');
+        $envelope = $this->envelope([
+            ...$options,
+            'type' => 'workRequest',
+            'payload' => json_encode([
+                'requestId' => $requestId,
+                'capability' => $capability,
+                'task' => $task,
+                'replySubject' => 'work.result.'.$requestId,
+            ], JSON_THROW_ON_ERROR),
+        ], requireSession: false);
+        $this->requireAgentType($envelope);
+        [$envelope['sessionId']] = $this->canonicalize($envelope['sessionId'], $envelope['agentType']);
+        $this->requireSubjectSafe($envelope['sessionId']);
+
+        try {
+            $this->publish('work.request.'.$capability.'.'.$requestId, $envelope);
+            $wait = max(0.0, (float) ($options['wait'] ?? 0));
+
+            if ($wait <= 0) {
+                echo json_encode($envelope, JSON_THROW_ON_ERROR)."\n";
+
+                return 0;
+            }
+
+            $result = $this->waitForEnvelope('work.result.'.$requestId, $requestId, $wait);
+
+            if ($result === null) {
+                fwrite(STDERR, "work result {$requestId} timed out\n");
+
+                return 1;
+            }
+
+            echo json_encode($result, JSON_THROW_ON_ERROR)."\n";
+
+            return 0;
+        } catch (Throwable $exception) {
+            fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
+
+            return 1;
+        }
+    }
+
+    /**
+     * Pull one addressed inbox message. The receiving process owns delivery;
+     * no terminal multiplexer or Herdr pane is required.
+     *
+     * @param  array<string, string>  $options
+     */
+    private function inbox(array $options): int
+    {
+        $sessionId = $this->sessionId($options, required: true);
+        $agentType = $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE');
+        [$canonical] = $this->canonicalize($sessionId, $agentType);
+
+        try {
+            $resolved = $this->resolveOnBus($canonical);
+
+            if ($resolved === null) {
+                fwrite(STDERR, "session {$sessionId} is not on the bus\n");
+
+                return 1;
+            }
+
+            $this->requireSubjectSafe($resolved);
+            $envelope = $this->pullInbox($resolved);
+        } catch (InvalidArgumentException $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
+
+            return 1;
+        }
+
+        if ($envelope === null) {
+            return 2;
+        }
+
+        echo json_encode($envelope, JSON_THROW_ON_ERROR)."\n";
+
+        return 0;
+    }
+
+    public static function inboxConsumerName(string $sessionId): string
+    {
+        $safe = preg_replace('/[^A-Za-z0-9_-]/', '-', $sessionId) ?? 'session';
+
+        return 'agent-bus-inbox-'.$safe;
+    }
+
+    /** @return array<string, mixed>|null */
+    private function pullInbox(string $sessionId): ?array
+    {
+        $consumer = $this->client()->getApi()->getStream($this->streamName())->getConsumer(self::inboxConsumerName($sessionId));
+
+        if (! $consumer->exists()) {
+            $consumer->getConfiguration()
+                ->setSubjectFilter('session.'.$sessionId.'.inbox')
+                ->setDeliverPolicy(DeliverPolicy::NEW)
+                ->setAckPolicy(AckPolicy::EXPLICIT);
+            $consumer->create();
+        }
+
+        $expires = getenv('AGENT_BUS_INBOX_EXPIRES');
+        $seconds = is_string($expires) ? (float) $expires : 0.0;
+        $consumer->setIterations(1);
+        $consumer->setBatching(1);
+        $consumer->setExpires($seconds > 0 ? $seconds : 0.5);
+
+        $got = null;
+        $consumer->handle(function (Payload $payload) use (&$got): void {
+            $decoded = json_decode($payload->body, true);
+            $got = is_array($decoded) ? $decoded : ['raw' => $payload->body];
+        });
+
+        return $got;
+    }
+
+    private function deleteInboxConsumer(string $sessionId): void
+    {
+        $consumer = $this->client()->getApi()->getStream($this->streamName())->getConsumer(self::inboxConsumerName($sessionId));
+
+        if ($consumer->exists()) {
+            $consumer->delete();
+        }
+    }
+
+    /**
+     * Publish a correlated result from any specialized worker.
+     *
+     * @param  array<string, string>  $options
+     */
+    private function workResult(array $options): int
+    {
+        $requestId = $options['request'] ?? '';
+        $this->requireSubjectSafe($requestId);
+
+        if ($requestId === '') {
+            throw new InvalidArgumentException('Missing --request.');
+        }
+
+        $status = $options['status'] ?? 'ok';
+
+        if (! in_array($status, ['ok', 'error'], true)) {
+            throw new InvalidArgumentException('--status must be ok or error.');
+        }
+
+        $result = $this->jsonObject($options['payload'] ?? '{}', 'payload');
+        $envelope = $this->envelope([
+            ...$options,
+            'type' => 'workResult',
+            'payload' => json_encode([
+                'requestId' => $requestId,
+                'status' => $status,
+                'result' => $result,
+            ], JSON_THROW_ON_ERROR),
+        ], requireSession: false);
+        $this->requireAgentType($envelope);
+
+        try {
+            $this->publish('work.result.'.$requestId, $envelope);
+        } catch (Throwable $exception) {
+            fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
+
+            return 1;
+        }
+
+        echo json_encode($envelope, JSON_THROW_ON_ERROR)."\n";
+
+        return 0;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function waitForEnvelope(string $subject, string $requestId, float $seconds): ?array
+    {
+        $deadline = microtime(true) + $seconds;
+
+        do {
+            try {
+                $response = $this->client()->getApi()->getStream($this->streamName())->getLastMessage($subject);
+                $data = $response->message->data ?? null;
+
+                if (is_string($data) && $data !== '') {
+                    $decoded = base64_decode($data, true);
+                    $payload = $decoded !== false ? $decoded : $data;
+                    $envelope = json_decode($payload, true);
+
+                    if (! is_array($envelope)) {
+                        continue;
+                    }
+
+                    $resultPayload = is_array($envelope['payload'] ?? null) ? $envelope['payload'] : [];
+
+                    if (($resultPayload['requestId'] ?? null) === $requestId) {
+                        return $envelope;
+                    }
+                }
+            } catch (Throwable) {
+                // The result subject does not exist yet.
+            }
+
+            usleep(100_000);
+        } while (microtime(true) < $deadline);
+
+        return null;
+    }
+
+    private function capability(string $capability): string
+    {
+        $capability = strtolower(trim($capability));
+
+        if (preg_match('/^[a-z][a-z0-9_-]{0,63}$/', $capability) !== 1) {
+            throw new InvalidArgumentException('Missing or invalid --capability; use one lowercase NATS token.');
+        }
+
+        return $capability;
+    }
+
+    /**
      * @param  array<string, string>  $options
      */
     private function heartbeat(array $options): int
@@ -367,7 +609,12 @@ class Cli
         $this->requireSubjectSafe($canonical);
 
         try {
-            $presence = $this->explicitPresence($canonical, $agentType, $this->option($options, 'model', 'AGENT_BUS_MODEL'));
+            $presence = $this->explicitPresence(
+                $canonical,
+                $agentType,
+                $this->option($options, 'model', 'AGENT_BUS_MODEL'),
+                $this->option($options, 'capabilities', 'AGENT_BUS_CAPABILITIES'),
+            );
             $this->putSession($canonical, json_encode($presence, JSON_THROW_ON_ERROR));
             $this->putAliases($aliases, $canonical);
         } catch (Throwable $exception) {
@@ -382,9 +629,9 @@ class Cli
     }
 
     /**
-     * @return array<string, string|int>
+     * @return array<string, mixed>
      */
-    private function explicitPresence(string $sessionId, string $agentType, string $model): array
+    private function explicitPresence(string $sessionId, string $agentType, string $model, string $capabilities = ''): array
     {
         $now = gmdate('Y-m-d\TH:i:s\Z');
         $firstSeen = $now;
@@ -401,6 +648,7 @@ class Cli
             'sessionId' => $sessionId,
             'agentType' => $agentType,
             'model' => $model,
+            'capabilities' => $this->capabilities($capabilities),
             'host' => gethostname() ?: '',
             'repo' => $this->repo(),
             'registered' => 'explicit',
@@ -409,6 +657,22 @@ class Cli
             'firstSeen' => $firstSeen,
             'lastSeen' => $now,
         ];
+    }
+
+    /** @return list<string> */
+    private function capabilities(string $capabilities): array
+    {
+        $values = [];
+
+        foreach (explode(',', $capabilities) as $capability) {
+            $capability = trim($capability);
+
+            if ($capability !== '') {
+                $values[$this->capability($capability)] = true;
+            }
+        }
+
+        return array_keys($values);
     }
 
     /**
@@ -445,18 +709,24 @@ class Cli
         $idsOnly = ($options['ids'] ?? '') === '1';
         $sessions = [];
 
+        if (! $this->bucketExists($this->kvBucket())) {
+            echo "[]\n";
+
+            return 0;
+        }
+
         foreach ($this->client()->getApi()->getBucket($this->kvBucket())->getAll() as $entry) {
             if ($entry->key === '' || ! is_string($entry->value) || $entry->value === '') {
                 continue;
             }
 
             if ($idsOnly) {
-                $sessions[] = $entry->key;
+                $sessions[$entry->key] = $entry->key;
 
                 continue;
             }
 
-            $sessions[] = $this->decodePresence($entry->key, $entry->value);
+            $sessions[$entry->key] = $this->decodePresence($entry->key, $entry->value);
         }
 
         echo json_encode(array_values($sessions), JSON_THROW_ON_ERROR)."\n";
@@ -513,6 +783,10 @@ class Cli
 
     private function session(string $id): ?string
     {
+        if (! $this->bucketExists($this->kvBucket())) {
+            return null;
+        }
+
         $value = $this->client()->getApi()->getBucket($this->kvBucket())->get($id);
 
         return is_string($value) && $value !== '' ? $value : null;
@@ -534,6 +808,11 @@ class Cli
         try {
             $resolved = $this->resolveOnBus($canonical) ?? $canonical;
             $this->requireSubjectSafe($resolved);
+            try {
+                $this->deleteInboxConsumer($resolved);
+            } catch (Throwable) {
+                // Presence deletion still wins; an orphaned consumer is idle.
+            }
             $this->deleteSession($resolved);
         } catch (Throwable $exception) {
             fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
@@ -546,7 +825,16 @@ class Cli
 
     private function deleteSession(string $id): void
     {
+        if (! $this->bucketExists($this->kvBucket())) {
+            return;
+        }
+
         $this->client()->getApi()->getBucket($this->kvBucket())->delete($id);
+    }
+
+    private function bucketExists(string $bucket): bool
+    {
+        return $this->client()->getApi()->getStream('KV_'.$bucket)->exists();
     }
 
     /**
@@ -632,6 +920,7 @@ class Cli
             $sessionId,
             $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'),
             $this->option($options, 'model', 'AGENT_BUS_MODEL'),
+            $this->option($options, 'capabilities', 'AGENT_BUS_CAPABILITIES'),
         );
 
         $this->putSession($sessionId, json_encode($presence, JSON_THROW_ON_ERROR));
@@ -764,12 +1053,20 @@ class Cli
     private function configuration(): Configuration
     {
         $parts = NatsUrl::parse(NatsUrl::fromEnvironment());
+        $user = getenv('NATS_USER');
+        $pass = getenv('NATS_PASS');
+        $tlsCaFile = getenv('NATS_TLS_CA');
+        $tlsCertFile = getenv('NATS_TLS_CERT');
+        $tlsKeyFile = getenv('NATS_TLS_KEY');
 
         return new Configuration(
             host: $parts['host'],
             port: $parts['port'],
-            user: $parts['user'],
-            pass: $parts['pass'],
+            user: is_string($user) && $user !== '' ? $user : $parts['user'],
+            pass: is_string($pass) && $pass !== '' ? $pass : $parts['pass'],
+            tlsKeyFile: is_string($tlsKeyFile) && $tlsKeyFile !== '' ? $tlsKeyFile : null,
+            tlsCertFile: is_string($tlsCertFile) && $tlsCertFile !== '' ? $tlsCertFile : null,
+            tlsCaFile: is_string($tlsCaFile) && $tlsCaFile !== '' ? $tlsCaFile : null,
             reconnect: false,
             timeout: $this->connectTimeout(),
             maxReconnectAttempts: 0,
@@ -870,10 +1167,13 @@ class Cli
 Usage:
   bin/agent-bus emit --type=<type> --agent-type=<name> [--payload=<json>] [--session=<id>] [--model=<name>]
   bin/agent-bus send --session=<id-or-alias> --payload=<json>
+  bin/agent-bus inbox --session=<id-or-alias>
   bin/agent-bus heartbeat --session=<id> [--agent-type=<name>] [--model=<name>]
   bin/agent-bus session-end --session=<id-or-alias>
   bin/agent-bus sessions [--ids]
   bin/agent-bus sessions get <id-or-alias>
+  bin/agent-bus work-request --capability=<name> --agent-type=<name> --payload=<json> [--session=<id>] [--wait=<seconds>]
+  bin/agent-bus work-result --request=<id> --status=<ok|error> --agent-type=<name> --payload=<json> [--session=<id>]
   bin/agent-bus hook
   bin/agent-bus opencode
 
@@ -882,6 +1182,7 @@ Ids normalize to {kind}:{provider_id}; alternates resolve via the session_aliase
 Cold path (boots the framework):
   bin/agent-bus provision
   bin/agent-bus sidecar [--once]
+  bin/agent-bus judge [--once]
 TXT."\n");
 
         return 1;

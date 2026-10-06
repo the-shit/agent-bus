@@ -2,6 +2,8 @@
 
 namespace App\Providers;
 
+use App\Bus\JudgeGateway;
+use App\Bus\TypeSafeJudgeGateway;
 use Illuminate\Console\Signals;
 use Illuminate\Support\ServiceProvider;
 
@@ -17,6 +19,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
+        $this->app->singleton(JudgeGateway::class, TypeSafeJudgeGateway::class);
+
         Signals::resolveAvailabilityUsing(function (): bool {
             return $this->app->runningInConsole()
                 && ! $this->app->runningUnitTests()

@@ -18,7 +18,7 @@ class ProvisionCommand extends Command
     public function handle(NatsBus $bus): int
     {
         if (! $bus->isReachable()) {
-            $this->error("NATS is not listening on {$bus->host()}:{$bus->port()}. Start the broker with docker compose up -d.");
+            $this->error("NATS is not reachable at {$bus->host()}:{$bus->port()}. Check NATS_URL and the broker.");
 
             return self::FAILURE;
         }

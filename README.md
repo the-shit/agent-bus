@@ -6,7 +6,9 @@
 
 Coding agents that can't see each other are just expensive tabs. This is the bus they board.
 
-NATS JetStream so Grok Build and OpenCode sessions can discover peers, subscribe to tool calls and idle, and send JSON to a live session — no pasting into someone else's TUI.
+NATS JetStream so any agent process can discover peers, advertise capabilities,
+receive addressed JSON, and claim specialized work — no shared terminal manager
+required.
 
 Laravel Zero 13 console app. First clients board **this** NATS bus (JetStream `AGENT_BUS` + KV `sessions`). Not Cloudflare Durable Objects.
 
@@ -34,7 +36,10 @@ Two agents on the same machine still work like strangers. You copy a path into c
 }
 ```
 
-- **Subjects:** `repo.{owner}.{name}.{event}` for fan-out. `session.{sessionId}.inbox` for addressed send.
+- **Subjects:** `repo.{owner}.{name}.{event}` for fan-out,
+  `session.{sessionId}.inbox` for addressed send, and
+  `work.request.{capability}.{requestId}` / `work.result.{requestId}` for
+  specialized work.
 - **Presence:** NATS KV bucket `sessions`. MCP `list_sessions` reads KV. Pane lists are a local adapter, not the registry.
 - **Capture:** harness hooks. Not the session `events.jsonl` dump. One Researcher session already logged 10,714 events, 10,639 of them `phase_changed`. That noise stays on disk.
 
@@ -50,15 +55,18 @@ Stay local: `phase_changed`, permission chatter, MCP connect, token stream, the 
 Hooks already get `sessionId`, `cwd`, `toolName` on stdin. `agent-bus emit`
 publishes. The framework does not boot on every tool call.
 
-- **Send:** MCP/CLI `send` publishes to `session.{id}.inbox`. A host sidecar subscribed to *this* session injects into the target (Herdr `agent prompt` for Grok). Prove: two agents, one send, the other turn starts with the JSON. No paste.
-- **First clients:** Grok Build and OpenCode.
+- **Send:** MCP/CLI `send` publishes to `session.{id}.inbox`. The target agent
+  process pulls its own durable inbox and injects it into its harness. Herdr is
+  only an optional legacy adapter for agents that cannot consume their inbox.
+- **First clients:** Pi, Grok Build, and OpenCode.
 
 ## First four
 
 1. **Stand JetStream + KV** — this compose file, stream `AGENT_BUS`, KV `sessions`. Done when `nats stream info` and `nats kv get sessions <id>` work from two terminals.
 2. **Hook capture allowlist** — global Grok hooks → `agent-bus emit`. Done when a PostToolUse for Composer shows one `toolCall` on the stream and `phase_changed` does not.
 3. **Presence MCP** — `list_sessions` / `get_session` read KV. Done when this pane's session appears after SessionStart and vanishes after SessionEnd.
-4. **Addressed inbox** — MCP `send` + sidecar. Done when a second agent receives a JSON ping with no paste.
+4. **Addressed inbox** — MCP `send` + target-owned inbox pull. Done when a
+   second agent receives a JSON ping with no Herdr process and no paste.
 
 ## Not this
 
@@ -104,8 +112,8 @@ checkout, PHP 8.4:
 
 | Path | Verbs | Cost |
 |---|---|---|
-| Hot | `emit` `send` `heartbeat` `session-end` `sessions` `hook` `opencode` | 66 ms |
-| Cold | `provision` `sidecar` `app:build` | 150 ms |
+| Hot | `emit` `send` `inbox` `heartbeat` `session-end` `sessions` `work-request` `work-result` `hook` `opencode` | 66 ms baseline |
+| Cold | `provision` `sidecar` `judge` `specialist` `app:build` | 150 ms baseline |
 
 A test runs every hot verb in a subprocess and fails if a single framework class
 gets loaded.
@@ -118,7 +126,9 @@ bin/agent-bus emit --type=toolCall --payload='{"tool":"composer"}'
 bin/agent-bus send --session 01a08ef9-2515-7460-89bd-5efc21f28642 --payload='{"text":"ping"}'
 # unknown session: fail closed
 
-bin/agent-bus heartbeat --session 01a08ef9-2515-7460-89bd-5efc21f28642
+bin/agent-bus inbox --session 01a08ef9-2515-7460-89bd-5efc21f28642
+bin/agent-bus heartbeat --session 01a08ef9-2515-7460-89bd-5efc21f28642 \
+  --agent-type=pi --capabilities=code_review,tool_failure_triage
 bin/agent-bus sessions
 # JSON array of presence records (sessionId, agentType, lastSeen, …)
 bin/agent-bus sessions --ids
@@ -151,20 +161,72 @@ Heartbeat PUTs presence JSON (`sessionId`, `agentType`, `repo`, `lastSeen`). `se
 
 ## Host sidecar
 
-One process per host. It maps Grok session ids from `herdr agent list` (`agent_session.value` → `pane_id`) onto KV `sessions`, then injects inbox JSON with `herdr agent prompt` so the **model** sees it. No paste. No markdown drop. No `wtype`.
+The sidecar is optional compatibility code, not part of the bus topology. Use it
+only for a harness that cannot pull `session.{id}.inbox` itself. It maps Grok
+session ids from `herdr agent list` onto panes and injects inbox JSON with
+`herdr agent prompt`.
 
 ```bash
 bin/agent-bus provision
 bin/agent-bus sidecar
 ```
 
-Leave it running. From another pane (session A):
+Agents with a native adapter should run `inbox` themselves and should not run
+the sidecar, because two consumers would produce duplicate delivery paths.
+
+From another process (session A):
 
 ```bash
 bin/agent-bus send --session <B> --payload '{"text":"ping"}'
 ```
 
-Session B's next turn contains that JSON. Restart the sidecar, send again, it still delivers.
+Session B's own adapter starts the next turn with that JSON. Herdr can be absent.
+
+## Specialized work and Jev
+
+Workers advertise comma-separated capabilities in heartbeat presence. A caller
+publishes one correlated request and may wait for its result:
+
+```bash
+bin/agent-bus work-request \
+  --capability=tool_failure_triage \
+  --agent-type=pi \
+  --session=pi:requester \
+  --payload='{"tool":"bash","argumentShape":"object","argumentCount":1,"errorSignals":["permission_denied"],"errorLengthBucket":"short","hasStackTrace":false,"retrySafe":false}' \
+  --wait=8
+```
+
+`bin/agent-bus judge` is the first capability worker. It consumes
+`tool_failure_triage`, asks TypeSafe Jev for one bounded classification, then
+applies deterministic local policy. The response is advisory and always marks
+`automatic: false`; it never retries a tool, grants permission, or executes a
+command. Before the external request, failures are projected onto a fixed signal
+schema (tool name, argument shape/count, coarse error flags, length bucket,
+stack-trace boolean, and retry safety). Raw arguments and error text are never
+sent to TypeSafe. `TYPESAFE_API_KEY` belongs on the worker, not in every agent
+process.
+
+All workers in one capability pool share a durable consumer, so one request is
+owned by one worker. Qwen code review, Grok image generation, and game building
+can use the same subject contract without becoming Herdr agents.
+
+The first Pi specialist profile is a read-only local Qwen reviewer:
+
+```bash
+NATS_URL=nats://odin:4222 bin/agent-bus specialist qwen-reviewer
+
+NATS_URL=nats://odin:4222 bin/agent-bus work-request \
+  --capability=code_review \
+  --agent-type=pi \
+  --session=pi:requester \
+  --payload='{"prompt":"Review app/Bus for delivery and security defects."}' \
+  --wait=600
+```
+
+The worker invokes Pi with `ollama/qwen3-coder-next:48k`, the reviewer persona,
+and only `read`, `grep`, `find`, and `ls`. Requests are passed as argument-array
+values rather than through a shell. Process failures return bounded generic
+errors so prompts and process arguments do not leak into result subjects.
 
 Pest proves the map and that the sidecar would prompt that pane (Herdr is faked; NATS tests skip when the broker is down). Live two-Grok prove is the issue, not CI.
 
