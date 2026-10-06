@@ -14,5 +14,8 @@ final readonly class CaptureAction
         public string $type = '',
         public array $payload = [],
         public string $model = '',
+        public ?string $eventId = null,
+        public ?string $correlationId = null,
+        public ?string $causationId = null,
     ) {}
 }

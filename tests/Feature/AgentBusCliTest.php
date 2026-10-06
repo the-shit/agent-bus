@@ -56,7 +56,11 @@ describe('emit', function () {
         $subject = 'repo.the-shit.agent-bus.'.$type;
 
         expect($printed)
-            ->toHaveKeys(['sessionId', 'agentType', 'model', 'repo', 'type', 'timestamp', 'payload'])
+            ->toHaveKeys(['schemaVersion', 'eventId', 'correlationId', 'causationId', 'sessionId', 'agentType', 'model', 'repo', 'type', 'timestamp', 'payload'])
+            ->and($printed['schemaVersion'])->toBe(1)
+            ->and($printed['eventId'])->toStartWith('01a08ef9-2515-7460-89bd-5efc21f28642.cliProve.')
+            ->and($printed['correlationId'])->toBeNull()
+            ->and($printed['causationId'])->toBeNull()
             ->and($printed['sessionId'])->toBe('01a08ef9-2515-7460-89bd-5efc21f28642')
             ->and($printed['agentType'])->toBe('grok')
             ->and($printed['model'])->toBe('grok-4.6')
@@ -230,11 +234,16 @@ describe('hook capture', function () {
         $envelope = $bus->lastEnvelope('repo.the-shit.agent-bus.toolCall');
 
         expect($envelope)
-            ->toHaveKeys(['sessionId', 'agentType', 'repo', 'type', 'timestamp', 'payload'])
+            ->toHaveKeys(['schemaVersion', 'eventId', 'correlationId', 'causationId', 'sessionId', 'agentType', 'repo', 'type', 'timestamp', 'payload'])
             ->and($envelope['type'])->toBe('toolCall')
             ->and($envelope['sessionId'])->toBe('01a08ef9-2515-7460-89bd-5efc21f28642')
             ->and($envelope['agentType'])->toBe('grok')
-            ->and($envelope['payload']['tool'])->toBe('run_terminal_command');
+            ->and($envelope['eventId'])->toStartWith('01a08ef9-2515-7460-89bd-5efc21f28642.toolCall.')
+            ->and($envelope['correlationId'])->toBeNull()
+            ->and($envelope['payload'])->toMatchArray([
+                'tool' => 'run_terminal_command',
+                'params' => ['command' => 'composer test'],
+            ]);
     })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
 
     it('does not publish a phase_changed subject', function () {
@@ -303,7 +312,12 @@ describe('opencode capture', function () {
         expect($envelope['type'])->toBe('toolCall')
             ->and($envelope['agentType'])->toBe('opencode')
             ->and($envelope['sessionId'])->toBe('oc-session-1')
-            ->and($envelope['payload']['tool'])->toBe('run_terminal_command');
+            ->and($envelope['eventId'])->toBe('oc-session-1.toolCall.call-1')
+            ->and($envelope['payload'])->toBe([
+                'tool' => 'run_terminal_command',
+                'callId' => 'call-1',
+                'params' => ['command' => 'composer test'],
+            ]);
     })->skip(fn () => ! app(NatsBus::class)->isReachable(), 'NATS broker is not running');
 });
 

@@ -72,6 +72,9 @@ final class GrokHook
             type: $type,
             payload: $payload !== [] ? $payload : Capture::toolPayload($event),
             model: $model,
+            eventId: Capture::eventId($event, $sessionId, $type),
+            correlationId: Capture::correlationId($event, $sessionId),
+            causationId: Capture::causationId($event),
         );
     }
 

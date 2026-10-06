@@ -2,7 +2,7 @@
 
 use App\Bus\GrokHook;
 
-it('maps PostToolUse to one toolCall emit with payload.tool', function () {
+it('maps PostToolUse to one toolCall emit with its parameters in the payload', function () {
     $actions = GrokHook::actions(grokEvent('grok/post-tool-use.json'));
 
     expect($actions)->toHaveCount(1)
@@ -10,7 +10,33 @@ it('maps PostToolUse to one toolCall emit with payload.tool', function () {
         ->and($actions[0]->type)->toBe('toolCall')
         ->and($actions[0]->agentType)->toBe('grok')
         ->and($actions[0]->sessionId)->toBe('01a08ef9-2515-7460-89bd-5efc21f28642')
-        ->and($actions[0]->payload['tool'])->toBe('run_terminal_command');
+        ->and($actions[0]->eventId)->toStartWith('01a08ef9-2515-7460-89bd-5efc21f28642.toolCall.')
+        ->and($actions[0]->correlationId)->toBeNull()
+        ->and($actions[0]->payload)->toMatchArray([
+            'tool' => 'run_terminal_command',
+            'params' => ['command' => 'composer test'],
+        ]);
+});
+
+it('redacts secrets and omits file contents from tool parameters', function () {
+    $actions = GrokHook::actions([
+        'hook_event_name' => 'PostToolUse',
+        'sessionId' => 's1',
+        'toolName' => 'write_file',
+        'toolInput' => [
+            'path' => 'secrets.txt',
+            'content' => 'super secret contents',
+            'token' => 'plain-text-token',
+            'headers' => ['Authorization' => 'Bearer secret-token'],
+        ],
+    ]);
+
+    expect($actions[0]->payload['params'])->toBe([
+        'path' => 'secrets.txt',
+        'content' => '[omitted 21 bytes]',
+        'token' => '[redacted]',
+        'headers' => ['Authorization' => '[redacted]'],
+    ]);
 });
 
 it('drops phase_changed so it is not published', function () {

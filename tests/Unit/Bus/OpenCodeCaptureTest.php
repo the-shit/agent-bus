@@ -10,7 +10,31 @@ it('maps tool.execute.after onto the same toolCall emit as Grok', function () {
         ->and($actions[0]->type)->toBe('toolCall')
         ->and($actions[0]->agentType)->toBe('opencode')
         ->and($actions[0]->sessionId)->toBe('oc-session-1')
-        ->and($actions[0]->payload['tool'])->toBe('run_terminal_command');
+        ->and($actions[0]->eventId)->toBe('oc-session-1.toolCall.call-1')
+        ->and($actions[0]->correlationId)->toBeNull()
+        ->and($actions[0]->payload)->toBe([
+            'tool' => 'run_terminal_command',
+            'callId' => 'call-1',
+            'params' => ['command' => 'composer test'],
+        ]);
+});
+
+it('uses the provider message id to correlate events from the same turn', function () {
+    $event = opencodeEvent('tool-execute-after.json');
+    $event['messageID'] = 'message-7';
+
+    $actions = OpenCodeCapture::actions($event);
+
+    expect($actions[0]->correlationId)->toBe('oc-session-1.turn.message-7');
+});
+
+it('keeps an empty provider argument object as empty params', function () {
+    $event = opencodeEvent('tool-execute-after.json');
+    $event['args'] = [];
+
+    $actions = OpenCodeCapture::actions($event);
+
+    expect($actions[0]->payload['params'])->toBe([]);
 });
 
 it('maps session.created to heartbeat and sessionStart', function () {

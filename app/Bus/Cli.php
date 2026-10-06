@@ -10,6 +10,8 @@ use Throwable;
 
 class Cli
 {
+    private const int SCHEMA_VERSION = 1;
+
     private ?Client $client = null;
 
     /**
@@ -301,6 +303,18 @@ class Cli
             $options['model'] = $action->model;
         }
 
+        if ($action->eventId !== null) {
+            $options['event-id'] = $action->eventId;
+        }
+
+        if ($action->correlationId !== null) {
+            $options['correlation-id'] = $action->correlationId;
+        }
+
+        if ($action->causationId !== null) {
+            $options['causation-id'] = $action->causationId;
+        }
+
         try {
             match ($action->verb) {
                 'emit' => $this->publishQuiet($options),
@@ -343,7 +357,7 @@ class Cli
 
     /**
      * @param  array<string, string>  $options
-     * @return array{sessionId: string, agentType: string, model: string, repo: string, type: string, timestamp: string, payload: array<string, mixed>}
+     * @return array{schemaVersion: int, eventId: string, correlationId: string|null, causationId: string|null, sessionId: string, agentType: string, model: string, repo: string, type: string, timestamp: string, payload: array<string, mixed>}
      */
     private function envelope(array $options, bool $requireSession): array
     {
@@ -358,8 +372,14 @@ class Cli
             $payloadJson = '{}';
         }
 
+        $sessionId = $this->sessionId($options, $requireSession);
+
         return [
-            'sessionId' => $this->sessionId($options, $requireSession),
+            'schemaVersion' => self::SCHEMA_VERSION,
+            'eventId' => $options['event-id'] ?? Capture::eventId([], $sessionId, $type),
+            'correlationId' => $options['correlation-id'] ?? null,
+            'causationId' => $options['causation-id'] ?? null,
+            'sessionId' => $sessionId,
             'agentType' => $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'),
             'model' => $this->option($options, 'model', 'AGENT_BUS_MODEL'),
             'repo' => $this->repo(),
@@ -537,8 +557,8 @@ class Cli
     {
         fwrite(STDERR, <<<'TXT'
 Usage:
-  bin/agent-bus emit --type=<type> [--payload=<json>] [--session=<id>] [--agent-type=<name>] [--model=<name>]
-  bin/agent-bus send --session=<id> --payload=<json>
+  bin/agent-bus emit --type=<type> [--payload=<json>] [--session=<id>] [--agent-type=<name>] [--model=<name>] [--event-id=<id>] [--correlation-id=<id>] [--causation-id=<id>]
+  bin/agent-bus send --session=<id> --payload=<json> [--event-id=<id>] [--correlation-id=<id>] [--causation-id=<id>]
   bin/agent-bus heartbeat --session=<id>
   bin/agent-bus session-end --session=<id>
   bin/agent-bus sessions

@@ -24,15 +24,28 @@ Two agents on the same machine still work like strangers. You copy a path into c
 
 ```json
 {
+  "schemaVersion": 1,
+  "eventId": "01a08ef9-2515-7460-89bd-5efc21f28642.toolCall.01993e72-0e5c-7000-8000-000000000000",
+  "correlationId": null,
+  "causationId": null,
   "sessionId": "01a08ef9-2515-7460-89bd-5efc21f28642",
   "agentType": "grok",
   "model": "grok-4.6",
   "repo": "the-shit/agent-bus",
   "type": "toolCall",
   "timestamp": "2026-09-11T06:00:00Z",
-  "payload": { "tool": "run_terminal_command", "cwd": "/home/you/agent-bus" }
+  "payload": {
+    "tool": "run_terminal_command",
+    "cwd": "/home/you/agent-bus",
+    "params": { "command": "composer test" }
+  }
 }
 ```
+
+`eventId` identifies one envelope: `{sessionId}.{eventType}.{providerEventId|uuidV7}`.
+`correlationId` groups envelopes from the same provider turn/message when that ID exists;
+it is `null` when the harness does not supply one. Tool call IDs and safely bounded,
+redacted parameters live in `payload`.
 
 - **Subjects:** `repo.{owner}.{name}.{event}` for fan-out. `session.{sessionId}.inbox` for addressed send.
 - **Presence:** NATS KV bucket `sessions`. MCP `list_sessions` reads KV. Pane lists are a local adapter, not the registry.
@@ -96,7 +109,7 @@ nats kv get sessions demo
 Hooks call `bin/agent-bus`. Composer autoload only — Laravel does not boot.
 
 ```bash
-bin/agent-bus emit --type=toolCall --payload='{"tool":"composer"}'
+bin/agent-bus emit --type=toolCall --payload='{"tool":"composer"}' --correlation-id=<session-id>.turn.<turn-id>
 # sessionId from --session or AGENT_BUS_SESSION_ID
 # broker down: exit 0, one stderr line
 
