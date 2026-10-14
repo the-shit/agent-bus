@@ -152,13 +152,6 @@ it('gives each overlapping work request to one worker and one correlated result'
     expect($capability)->not->toBe('tool_failure_triage');
 
     try {
-        $claims = [
-            proveStart(proveClaim($capability, $consumer, $workerA), [], 20),
-            proveStart(proveClaim($capability, $consumer, $workerB), [], 20),
-        ];
-
-        expect(proveWaitForConsumer($consumer))->toBeTrue();
-
         $requestA = proveStart([
             'work-request',
             '--capability='.$capability,
@@ -179,11 +172,18 @@ it('gives each overlapping work request to one worker and one correlated result'
         $sentB = $requestB->wait();
         $envelopeA = json_decode($sentA->output(), true);
         $envelopeB = json_decode($sentB->output(), true);
+        $beforeWorkers = Process::timeout(5)->run(['nats', 'consumer', 'info', 'AGENT_BUS', $consumer]);
 
         expect($sentA->exitCode())->toBe(0)
             ->and($sentB->exitCode())->toBe(0)
             ->and($envelopeA['payload']['capability'])->toBe($capability)
-            ->and($envelopeB['payload']['capability'])->toBe($capability);
+            ->and($envelopeB['payload']['capability'])->toBe($capability)
+            ->and($beforeWorkers->exitCode())->not->toBe(0);
+
+        $claims = [
+            proveStart(proveClaim($capability, $consumer, $workerA), [], 20),
+            proveStart(proveClaim($capability, $consumer, $workerB), [], 20),
+        ];
 
         $claimedA = $claims[0]->wait();
         $claimedB = $claims[1]->wait();
@@ -219,6 +219,12 @@ it('gives each overlapping work request to one worker and one correlated result'
                 ->and($printed['payload']['result']['worker'])->toBeIn([$workerA, $workerB])
                 ->and($stored)->toBe($printed);
         }
+
+        $info = Process::timeout(5)->run(['nats', 'consumer', 'info', 'AGENT_BUS', $consumer, '--json']);
+        $consumerInfo = json_decode($info->output(), true);
+
+        expect($info->exitCode())->toBe(0)
+            ->and($consumerInfo['config']['deliver_policy'] ?? null)->toBe('all');
     } finally {
         foreach ($claims as $claim) {
             if ($claim->running()) {
@@ -312,23 +318,6 @@ function proveClaim(string $capability, string $consumer, string $sessionId, int
         '--agent-type=grok',
         '--wait='.$wait,
     ];
-}
-
-function proveWaitForConsumer(string $consumer): bool
-{
-    $deadline = microtime(true) + 8;
-
-    do {
-        $info = Process::timeout(5)->run(['nats', 'consumer', 'info', 'AGENT_BUS', $consumer]);
-
-        if ($info->exitCode() === 0) {
-            return true;
-        }
-
-        usleep(100_000);
-    } while (microtime(true) < $deadline);
-
-    return false;
 }
 
 /**
