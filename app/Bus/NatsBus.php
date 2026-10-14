@@ -3,6 +3,7 @@
 namespace App\Bus;
 
 use Basis\Nats\Consumer\AckPolicy;
+use Basis\Nats\Consumer\Consumer;
 use Basis\Nats\Consumer\DeliverPolicy;
 use Basis\Nats\KeyValue\Bucket;
 use Basis\Nats\Message\Payload;
@@ -435,25 +436,27 @@ class NatsBus
         $this->assertCapability($capability);
         $this->assertConsumerName($consumerName);
 
-        $consumer = $this->stream()->getConsumer($consumerName);
+        $consumer = $this->workConsumer($consumerName);
 
         if ($consumer->exists()) {
             return;
         }
 
+        // Start at the first matching request so mail stored before any worker
+        // is running remains claimable for the life of this consumer.
         $ackWaitSeconds = max(1, (int) config('agent_bus.worker.ack_wait_seconds', 300));
         $consumer->getConfiguration()
             ->setSubjectFilter('work.request.'.$capability.'.*')
-            ->setDeliverPolicy(DeliverPolicy::NEW)
+            ->setDeliverPolicy(DeliverPolicy::ALL)
             ->setAckPolicy(AckPolicy::EXPLICIT)
             ->setAckWait($ackWaitSeconds * 1_000_000_000);
 
         try {
             $consumer->create();
         } catch (Throwable $exception) {
-            $again = $this->stream()->getConsumer($consumerName);
+            $winner = $this->workConsumer($consumerName);
 
-            if ($again->exists()) {
+            if ($winner->exists()) {
                 return;
             }
 
@@ -477,7 +480,7 @@ class NatsBus
 
         $batch = (int) config('agent_bus.worker.batch', 8);
         $expires = (float) config('agent_bus.worker.expires', 0.5);
-        $consumer = $this->stream()->getConsumer($consumerName);
+        $consumer = $this->workConsumer($consumerName);
         $consumer->setIterations(max(1, $iterations));
         $consumer->setBatching(max(1, $batch));
         $consumer->setExpires($expires > 0 ? $expires : 0.5);
@@ -536,6 +539,11 @@ class NatsBus
         }
 
         return $prefix.'-'.$host;
+    }
+
+    private function workConsumer(string $consumerName): Consumer
+    {
+        return new Consumer($this->stream()->client, $this->streamName(), $consumerName);
     }
 
     private function assertCapability(string $capability): void
