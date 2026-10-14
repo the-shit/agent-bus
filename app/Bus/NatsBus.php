@@ -564,6 +564,19 @@ class NatsBus
         return $this->nats->jetstream()->stream($this->streamName());
     }
 
+    /**
+     * Drop every message on the configured stream. The live AGENT_BUS stream
+     * is refused so a test or a caller cannot wipe production mail.
+     */
+    public function purgeStream(): void
+    {
+        if ($this->streamName() === 'AGENT_BUS') {
+            throw new RuntimeException('Refusing to purge the live AGENT_BUS stream.');
+        }
+
+        $this->stream()->purge();
+    }
+
     private function bucket(): Bucket
     {
         return $this->nats->jetstream()->api()->getBucket($this->kvBucket());
