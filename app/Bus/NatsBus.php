@@ -5,6 +5,7 @@ namespace App\Bus;
 use Basis\Nats\Consumer\AckPolicy;
 use Basis\Nats\Consumer\DeliverPolicy;
 use Basis\Nats\KeyValue\Bucket;
+use Basis\Nats\Message\Msg;
 use Basis\Nats\Message\Payload;
 use Basis\Nats\Stream\Stream;
 use InvalidArgumentException;
@@ -214,6 +215,51 @@ class NatsBus
     }
 
     /**
+     * Presence records from one KV scan. A non-object value becomes a record
+     * that carries only the key, and a missing sessionId is filled from that key.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function listPresence(): array
+    {
+        $records = [];
+
+        foreach ($this->bucket()->getAll() as $entry) {
+            if ($entry->key === '' || ! is_string($entry->value) || $entry->value === '') {
+                continue;
+            }
+
+            $decoded = json_decode($entry->value, true);
+            $record = is_array($decoded) ? $decoded : ['sessionId' => $entry->key];
+
+            if (! is_string($record['sessionId'] ?? null) || $record['sessionId'] === '') {
+                $record['sessionId'] = $entry->key;
+            }
+
+            $records[] = $record;
+        }
+
+        return $records;
+    }
+
+    /**
+     * Session id that is present, or the canonical id stored for an alias.
+     * Empty input and an unknown id both return null.
+     */
+    public function resolveSessionId(string $sessionId): ?string
+    {
+        if ($sessionId === '') {
+            return null;
+        }
+
+        if ($this->getSession($sessionId) !== null) {
+            return $sessionId;
+        }
+
+        return $this->getAlias($sessionId);
+    }
+
+    /**
      * Canonical session id for an alternate (bare UUID, jsonl path, pane id).
      * Null when the alias bucket is missing or the alternate is unknown.
      */
@@ -267,7 +313,9 @@ class NatsBus
     }
 
     /**
-     * Pull one inbox batch. Unknown sessions are acked (dropped) by the caller returning normally.
+     * Pull one inbox batch. A handler that returns is acknowledged. A handler
+     * that throws is retried by InboxDelivery, then recorded and acknowledged
+     * once the attempt limit is exhausted.
      *
      * @param  callable(string, string): void  $handler
      */
@@ -283,10 +331,17 @@ class NatsBus
         $consumer->setBatching(max(1, $batch));
         $consumer->setExpires($expires > 0 ? $expires : 0.5);
 
-        return $consumer->handle(function (Payload $payload) use ($handler): void {
-            $subject = is_string($payload->subject) ? $payload->subject : '';
-            $handler($subject, $payload->body);
-        });
+        return $consumer->handle(function (Payload $payload, ?string $replyTo) use ($handler): void {
+            $message = new Msg([
+                'subject' => is_string($payload->subject) ? $payload->subject : '',
+                'sid' => '0',
+                'replyTo' => $replyTo,
+                'length' => strlen($payload->body),
+                'payload' => $payload,
+            ]);
+            $message->setClient($this->nats->connection());
+            (new InboxDelivery($this))->handle($message, $handler);
+        }, ack: false);
     }
 
     public function monitorConsumerName(): string
@@ -470,6 +525,19 @@ class NatsBus
     public function stream(): Stream
     {
         return $this->nats->jetstream()->stream($this->streamName());
+    }
+
+    /**
+     * Drop every message on the configured stream. The live AGENT_BUS stream
+     * is refused so a test or a caller cannot wipe production mail.
+     */
+    public function purgeStream(): void
+    {
+        if ($this->streamName() === 'AGENT_BUS') {
+            throw new RuntimeException('Refusing to purge the live AGENT_BUS stream.');
+        }
+
+        $this->stream()->purge();
     }
 
     private function bucket(): Bucket
