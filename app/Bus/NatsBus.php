@@ -7,9 +7,11 @@ use Basis\Nats\Consumer\DeliverPolicy;
 use Basis\Nats\KeyValue\Bucket;
 use Basis\Nats\Message\Payload;
 use Basis\Nats\Stream\Stream;
+use InvalidArgumentException;
 use JsonException;
 use LaravelNats\Laravel\NatsV2Gateway;
 use RuntimeException;
+use Throwable;
 
 class NatsBus
 {
@@ -71,13 +73,19 @@ class NatsBus
     {
         $stream = $this->stream();
         $configuration = $stream->getConfiguration();
+        $exists = $stream->exists();
 
-        if (! $stream->exists()) {
-            $configuration->setSubjects($this->subjects());
-            $configuration->setDuplicateWindow(2.0);
-        }
+        $configuration->setSubjects($this->subjects());
+        $configuration->setDuplicateWindow(max(2.0, (float) config('agent_bus.stream_limits.duplicate_window_seconds', 900)));
+        $configuration->setMaxAge(max(0, (int) config('agent_bus.stream_limits.max_age_seconds', 604800)) * 1_000_000_000);
+        $configuration->setMaxBytes(max(1_048_576, (int) config('agent_bus.stream_limits.max_bytes', 1_073_741_824)));
+        $configuration->setMaxMessageSize(max(1_024, (int) config('agent_bus.stream_limits.max_message_bytes', 262_144)));
 
         $stream->createIfNotExists();
+
+        if ($exists) {
+            $stream->update();
+        }
 
         $ttlSeconds = (int) config('agent_bus.kv.ttl_seconds', 90);
         $history = (int) config('agent_bus.kv.history', 1);
@@ -90,6 +98,9 @@ class NatsBus
 
         $stream = $bucket->getStream();
         $bucket->getConfiguration()->configureStream($stream->getConfiguration());
+        // NATS refuses a duplicate window longer than max_age. New KV buckets
+        // default to a two-minute window, which is invalid for our 90s TTL.
+        $stream->getConfiguration()->setDuplicateWindow(min(2.0, max(0.001, $ttlSeconds)));
         $stream->update();
 
         // Alternate id -> canonical id map. No TTL: aliases are durable
@@ -119,7 +130,7 @@ class NatsBus
     /**
      * @param  array<string, mixed>  $envelope
      */
-    public function publishEnvelope(string $subject, array $envelope): void
+    public function publishEnvelope(string $subject, array $envelope, ?string $messageId = null): void
     {
         try {
             $body = json_encode($envelope, JSON_THROW_ON_ERROR);
@@ -127,7 +138,38 @@ class NatsBus
             throw new RuntimeException('Failed to encode the bus envelope as JSON.', 0, $exception);
         }
 
-        $this->stream()->publish($subject, $body);
+        $payload = $messageId === null
+            ? $body
+            : new Payload($body, ['Nats-Msg-Id' => $messageId]);
+
+        $this->stream()->publish($subject, $payload);
+    }
+
+    public function completedWorkResultExists(string $requestId): bool
+    {
+        $this->assertRequestId($requestId);
+
+        try {
+            $response = $this->stream()->getLastMessage('work.result.'.$requestId);
+        } catch (\Exception $exception) {
+            if ($exception->getMessage() === 'no message found') {
+                return false;
+            }
+
+            throw $exception;
+        }
+
+        $data = $response->message->data ?? null;
+
+        if (! is_string($data) || $data === '') {
+            return false;
+        }
+
+        $envelope = $this->decodeEnvelope($data);
+        $payload = is_array($envelope['payload'] ?? null) ? $envelope['payload'] : [];
+
+        return ($payload['requestId'] ?? null) === $requestId
+            && in_array($payload['status'] ?? null, ['ok', 'error'], true);
     }
 
     /**
@@ -204,7 +246,7 @@ class NatsBus
 
         try {
             $value = $this->aliasBucket()->get(self::aliasKey($alternate));
-        } catch (\Throwable) {
+        } catch (Throwable) {
             return null;
         }
 
@@ -388,6 +430,65 @@ class NatsBus
         });
     }
 
+    public function ensureWorkConsumer(string $capability, string $consumerName): void
+    {
+        $this->assertCapability($capability);
+        $this->assertConsumerName($consumerName);
+
+        $consumer = $this->stream()->getConsumer($consumerName);
+
+        if ($consumer->exists()) {
+            return;
+        }
+
+        $ackWaitSeconds = max(1, (int) config('agent_bus.worker.ack_wait_seconds', 300));
+        $consumer->getConfiguration()
+            ->setSubjectFilter('work.request.'.$capability.'.*')
+            ->setDeliverPolicy(DeliverPolicy::NEW)
+            ->setAckPolicy(AckPolicy::EXPLICIT)
+            ->setAckWait($ackWaitSeconds * 1_000_000_000);
+
+        try {
+            $consumer->create();
+        } catch (Throwable $exception) {
+            $again = $this->stream()->getConsumer($consumerName);
+
+            if ($again->exists()) {
+                return;
+            }
+
+            throw $exception;
+        }
+    }
+
+    /**
+     * Pull one batch from a capability queue. Every worker in the same pool
+     * uses the same durable consumer name, so each request has one owner.
+     *
+     * @param  callable(string, array<string, mixed>): void  $handler
+     */
+    public function consumeWork(
+        string $capability,
+        string $consumerName,
+        callable $handler,
+        int $iterations = 1,
+    ): int {
+        $this->ensureWorkConsumer($capability, $consumerName);
+
+        $batch = (int) config('agent_bus.worker.batch', 8);
+        $expires = (float) config('agent_bus.worker.expires', 0.5);
+        $consumer = $this->stream()->getConsumer($consumerName);
+        $consumer->setIterations(max(1, $iterations));
+        $consumer->setBatching(max(1, $batch));
+        $consumer->setExpires($expires > 0 ? $expires : 0.5);
+
+        return $consumer->handle(function (Payload $payload) use ($handler): void {
+            $subject = is_string($payload->subject) ? $payload->subject : '';
+            $body = is_string($payload->body) ? $payload->body : '';
+            $handler($subject, $this->decodeEnvelope($body));
+        });
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -437,7 +538,28 @@ class NatsBus
         return $prefix.'-'.$host;
     }
 
-    private function stream(): Stream
+    private function assertCapability(string $capability): void
+    {
+        if (preg_match('/^[a-z][a-z0-9_-]{0,63}$/', $capability) !== 1) {
+            throw new InvalidArgumentException('Work capability must be one lowercase NATS token.');
+        }
+    }
+
+    private function assertConsumerName(string $consumerName): void
+    {
+        if (preg_match('/^[A-Za-z0-9_-]{1,128}$/', $consumerName) !== 1) {
+            throw new InvalidArgumentException('Work consumer name contains unsupported characters.');
+        }
+    }
+
+    private function assertRequestId(string $requestId): void
+    {
+        if (preg_match('/^[^\s.*>]{1,128}$/', $requestId) !== 1) {
+            throw new InvalidArgumentException('Work request id contains unsupported characters.');
+        }
+    }
+
+    public function stream(): Stream
     {
         return $this->nats->jetstream()->stream($this->streamName());
     }
