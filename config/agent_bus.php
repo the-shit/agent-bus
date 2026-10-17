@@ -19,10 +19,6 @@ return [
         'bucket' => env('AGENT_BUS_ALIAS_BUCKET', 'session_aliases'),
     ],
 
-    'herdr' => [
-        'binary' => env('AGENT_BUS_HERDR', 'herdr'),
-    ],
-
     'sidecar' => [
         'consumer' => env('AGENT_BUS_SIDECAR_CONSUMER'),
         'max_attempts' => (int) env('AGENT_BUS_SIDECAR_MAX_ATTEMPTS', 5),
