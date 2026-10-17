@@ -12,7 +12,7 @@ class AppServiceProvider extends ServiceProvider
      *
      * Laravel Zero does not register Illuminate's ArtisanServiceProvider, so
      * Signals has no availability resolver and Command::trap() fatals on a null
-     * callable. The sidecar traps SIGTERM/SIGINT to leave the bus politely, so
+     * callable. Long-running commands (monitor) trap SIGTERM/SIGINT to leave the bus politely, so
      * install the same resolver Laravel uses.
      */
     public function register(): void

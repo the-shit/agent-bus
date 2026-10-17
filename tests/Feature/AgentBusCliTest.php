@@ -431,7 +431,7 @@ describe('identity normalization', function () {
         $canonical = 'pi:'.$uuid;
         $bus->deleteSession($canonical);
 
-        // Herdr reports the jsonl path; the bus converges it onto pi:{uuid}.
+        // A pi reporter sends the jsonl path; the bus converges it onto pi:{uuid}.
         $emit = agentBusCli([
             'emit',
             '--type=toolCall',
