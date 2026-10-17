@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# bus-emit: report one Agent Bus activity event to Asgard (POST /api/agent-bus/events).
+# Usage: bus-emit <bot> <kind> <summary> [status] [ref]
+#   kind: start | step | done | error | heartbeat
+# Env: ASGARD_URL, ASGARD_AGENT_TOKEN (required); BUS_FAMILY (grok|harness, default grok), BUS_SESSION (optional).
+# If Asgard is unreachable or rejects the event, falls back to `nats pub bot.<bot>.activity` when nats is installed.
+set -euo pipefail
+
+if [ $# -lt 3 ]; then
+  echo "usage: bus-emit <bot> <kind> <summary> [status] [ref]" >&2
+  exit 64
+fi
+
+bot=$1 kind=$2 summary=$3 status=${4:-info} ref=${5:-}
+
+if command -v uuidgen >/dev/null 2>&1; then
+  id=$(uuidgen | tr 'A-Z' 'a-z')
+else
+  id=$(cat /proc/sys/kernel/random/uuid)
+fi
+
+body=$(jq -nc \
+  --arg id "$id" --arg at "$(date -u +%FT%TZ)" --arg bot "$bot" --arg family "${BUS_FAMILY:-grok}" \
+  --arg host "$(hostname)" --arg sess "${BUS_SESSION:-}" --arg kind "$kind" --arg st "$status" \
+  --arg s "$summary" --arg ref "$ref" \
+  '{v:1,id:$id,at:$at,bot:$bot,family:$family,host:$host,session:$sess,kind:$kind,status:$st,summary:$s,ref:$ref,meta:{}}')
+
+if curl -fsS -m 5 -X POST "${ASGARD_URL:?ASGARD_URL is required}/api/agent-bus/events" \
+  -H "Authorization: Bearer ${ASGARD_AGENT_TOKEN:?ASGARD_AGENT_TOKEN is required}" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json' -d "$body" >/dev/null; then
+  exit 0
+fi
+
+if command -v nats >/dev/null 2>&1; then
+  echo "bus-emit: Asgard POST failed; falling back to nats pub bot.$bot.activity (event $id)" >&2
+  nats pub "bot.$bot.activity" "$body"
+else
+  echo "bus-emit: Asgard POST failed and nats is not installed; event $id dropped" >&2
+  exit 1
+fi
