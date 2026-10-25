@@ -24,6 +24,7 @@ class Cli
         'sessions',
         'hook',
         'opencode',
+        'consume',
     ];
 
     private ?Client $client = null;
@@ -84,6 +85,7 @@ class Cli
             'sessions' => $this->sessions($positionals, $options),
             'hook' => $this->fromStdin(GrokHook::class),
             'opencode' => $this->fromStdin(OpenCodeCapture::class),
+            'consume' => $this->consume($positionals, $options),
             default => $this->usage(),
         };
     }
@@ -550,6 +552,116 @@ class Cli
     }
 
     /**
+     * @param  list<string>  $positionals
+     * @param  array<string, string>  $options
+     */
+    private function consume(array $positionals, array $options): int
+    {
+        try {
+            $sessionIds = $options['session'] ?? [];
+            if (! is_array($sessionIds) || $sessionIds === []) {
+                throw new InvalidArgumentException('At least one --session is required. Use --session=<id> to specify session IDs.');
+            }
+
+            $max = (int) ($options['max'] ?? 1);
+            if ($max < 1) {
+                throw new InvalidArgumentException('--max must be at least 1');
+            }
+
+            $client = $this->client();
+            $stream = $client->getApi()->getStream($this->streamName());
+
+            // Get list of valid sessions from KV
+            $validSessions = [];
+            foreach ($client->getApi()->getBucket($this->kvBucket())->getAll() as $entry) {
+                if ($entry->key !== '' && is_string($entry->key)) {
+                    $validSessions[$entry->key] = true;
+                }
+            }
+
+            $consumed = 0;
+            foreach ($sessionIds as $sessionId) {
+                $canonical = $this->canonicalize($sessionId, $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'))[0];
+                $resolved = $this->resolveOnBus($canonical) ?? $canonical;
+                $this->requireSubjectSafe($resolved);
+
+                if (! isset($validSessions[$resolved])) {
+                    fwrite(STDERR, "Session {$sessionId} is not on the bus\n");
+                    continue;
+                }
+
+                // Pull messages for this session
+                $consumer = $stream->getConsumer($this->sidecarConsumerName());
+                $consumer->setBatching(1);
+                $consumer->setExpires(0.5);
+
+                $queue = $consumer->getQueue();
+                try {
+                    $count = 0;
+                    foreach ($queue->fetchAll(1) as $message) {
+                        if ($message->payload->isEmpty()) {
+                            continue;
+                        }
+
+                        $subject = is_string($message->subject) ? $message->subject : '';
+
+                        // Check if this message is for the requested session
+                        if (preg_match('/^session\.(.+)\.inbox$/', $subject, $matches) === 1) {
+                            $messageSession = $matches[1];
+                            if ($messageSession === $resolved) {
+                                $body = is_string($message->payload->body) ? $message->payload->body : '';
+                                
+                                // Echo the message
+                                echo json_encode([
+                                    'sessionId' => $resolved,
+                                    'subject' => $subject,
+                                    'body' => $body,
+                                ], JSON_THROW_ON_ERROR)."\n";
+                                
+                                // Acknowledge the message
+                                $message->ack();
+                                $consumed++;
+                                $count++;
+
+                                if ($consumed >= $max) {
+                                    break 2;
+                                }
+                            } else {
+                                // Not for this session, nack it so it can be processed by others
+                                $message->nack();
+                            }
+                        } else {
+                            // Not an inbox message, ack it
+                            $message->ack();
+                        }
+                    }
+                } finally {
+                    $consumer->client->unsubscribe($queue);
+                }
+            }
+
+            fwrite(STDOUT, "Consumed {$consumed} message(s) total\n");
+        } catch (Throwable $exception) {
+            fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
+
+            return 1;
+        }
+
+        return 0;
+    }
+
+    private function sidecarConsumerName(): string
+    {
+        $configured = getenv('AGENT_BUS_CONSUMER');
+        if (is_string($configured) && $configured !== '') {
+            return $configured;
+        }
+
+        // Use the same consumer as sidecar
+        return $this->hostScopedConsumerName('agent-bus-sidecar');
+    }
+
+    /**
      * @param  class-string<GrokHook|OpenCodeCapture>  $mapper
      */
     private function fromStdin(string $mapper): int
@@ -876,15 +988,23 @@ Usage:
   bin/agent-bus sessions get <id-or-alias>
   bin/agent-bus hook
   bin/agent-bus opencode
+  bin/agent-bus consume --session=<id> [--max=<count>]
 
 Ids normalize to {kind}:{provider_id}; alternates resolve via the session_aliases KV bucket.
 
 Cold path (boots the framework):
   bin/agent-bus provision
   bin/agent-bus sidecar [--once]
+  bin/agent-bus consume --session=<id> [--max=<count>]
 TXT."\n");
 
         return 1;
+    }
+
+    private function hostScopedConsumerName(string $prefix): string
+    {
+        $hostname = gethostname();
+        return $prefix.'-'.hash('sha256', $hostname ?: 'localhost');
     }
 
     private function oneLine(string $message): string

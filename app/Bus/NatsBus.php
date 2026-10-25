@@ -339,6 +339,67 @@ class NatsBus
         return $processed;
     }
 
+    /**
+     * Pull inbox messages for a specific session. This is for plain-terminal
+     * agents that want to consume their own inbox without running a sidecar.
+     *
+     * Returns the messages pulled, without auto-acking them. The caller is
+     * responsible for acking or nacking each message.
+     *
+     * @return list<array{subject: string, body: string, message: \Basis\Nats\Message\Msg}>
+     */
+    public function pullInbox(string $sessionId, int $max = 1): array
+    {
+        $this->ensureInboxConsumer();
+
+        $expires = (float) config('agent_bus.sidecar.expires', 0.5);
+
+        $consumer = $this->stream()->getConsumer($this->sidecarConsumerName());
+        $consumer->setBatching(1);
+        $consumer->setExpires($expires > 0 ? $expires : 0.5);
+
+        $messages = [];
+        $queue = $consumer->getQueue();
+
+        try {
+            $count = 0;
+            foreach ($queue->fetchAll(1) as $message) {
+                if ($message->payload->isEmpty()) {
+                    continue;
+                }
+
+                $subject = is_string($message->subject) ? $message->subject : '';
+
+                // Check if this message is for the requested session
+                if (preg_match('/^session\.(.+)\.inbox$/', $subject, $matches) === 1) {
+                    $messageSession = $matches[1];
+                    if ($messageSession === $sessionId) {
+                        $body = is_string($message->payload->body) ? $message->payload->body : '';
+                        $messages[] = [
+                            'subject' => $subject,
+                            'body' => $body,
+                            'message' => $message,
+                        ];
+                        $count++;
+                        if ($count >= $max) {
+                            break;
+                        }
+                    } else {
+                        // Not for this session, nack it so it can be processed by others
+                        $message->nack();
+                    }
+                } else {
+                    // Not an inbox message, ack it
+                    $message->ack();
+                }
+            }
+        } finally {
+            $consumer->client->unsubscribe($queue);
+        }
+
+        return $messages;
+    }
+
     public function monitorConsumerName(): string
     {
         $configured = config('agent_bus.monitor.consumer');
