@@ -330,6 +330,66 @@ describe('opencode capture', function () {
     })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 });
 
+describe('music capture', function () {
+    it('maps playback_start to the bus and exits 0 when the broker is down', function () {
+        $result = agentBusCliWithStdin(
+            ['music'],
+            (string) file_get_contents(base_path('tests/Fixtures/music/playback-start.json')),
+            ['NATS_URL' => 'nats://127.0.0.1:1'],
+        );
+
+        expect($result->exitCode())->toBe(0)
+            ->and($result->output())->toBe('')
+            ->and($result->errorOutput())
+            ->not->toContain('Stack trace')
+            ->not->toContain('Illuminate\\')
+            ->not->toContain('artisan');
+    });
+
+    it('publishes playbackStart envelope from PlaybackStart', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $result = agentBusCliWithStdin(
+            ['music'],
+            (string) file_get_contents(base_path('tests/Fixtures/music/playback-start.json')),
+        );
+
+        expect($result->exitCode())->toBe(0)
+            ->and($result->output())->toBe('');
+
+        $envelope = $bus->lastEnvelope('repo.the-shit.agent-bus.playbackStart');
+
+        expect($envelope)
+            ->toHaveKeys(['v', 'sessionId', 'agentType', 'repo', 'type', 'timestamp', 'payload'])
+            ->and($envelope['v'])->toBe(2)
+            ->and($envelope['type'])->toBe('playbackStart')
+            ->and($envelope['sessionId'])->toBe('music:01a08ef9-2515-7460-89bd-5efc21f28642')
+            ->and($envelope['agentType'])->toBe('music')
+            ->and($envelope['payload']['track']['title'])->toBe('Never Gonna Give You Up');
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+    it('publishes trackChange envelope with previousTrack', function () {
+        $bus = app(NatsBus::class);
+        $bus->provision();
+
+        $result = agentBusCliWithStdin(
+            ['music'],
+            (string) file_get_contents(base_path('tests/Fixtures/music/track-change.json')),
+        );
+
+        expect($result->exitCode())->toBe(0);
+
+        $envelope = $bus->lastEnvelope('repo.the-shit.agent-bus.trackChange');
+
+        expect($envelope['type'])->toBe('trackChange')
+            ->and($envelope['agentType'])->toBe('music')
+            ->and($envelope['sessionId'])->toBe('music:01a08ef9-2515-7460-89bd-5efc21f28642')
+            ->and($envelope['payload']['track']['title'])->toBe('Walking on Sunshine')
+            ->and($envelope['payload']['previousTrack']['title'])->toBe('Never Gonna Give You Up');
+    })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+});
+
 describe('session-end', function () {
     it('removes the KV key so sessions no longer lists it', function () {
         $bus = app(NatsBus::class);
@@ -534,6 +594,7 @@ describe('hot path', function () {
         'sessions' => ['sessions'],
         'hook' => ['hook'],
         'opencode' => ['opencode'],
+        'music' => ['music'],
     ]);
 
     it('keeps every hook verb on the hot path', function () {

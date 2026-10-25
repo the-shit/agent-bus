@@ -12,7 +12,7 @@ final class BusIdentity
 {
     private const UUID_PATTERN = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
 
-    private const KNOWN_KINDS = ['grok', 'pi', 'opencode', 'codex', 'herdr'];
+    private const KNOWN_KINDS = ['grok', 'pi', 'opencode', 'codex', 'herdr', 'music'];
 
     /**
      * Canonical id for the reporter's event, or null when the event carries
@@ -98,7 +98,7 @@ final class BusIdentity
         $uuid = self::uuidFrom($candidate);
 
         return match ($kind) {
-            'grok', 'codex', 'pi' => $uuid !== null ? $kind.':'.$uuid : null,
+            'grok', 'codex', 'pi', 'music' => $uuid !== null ? $kind.':'.$uuid : null,
             'opencode' => str_starts_with($candidate, 'ses_') ? 'opencode:'.$candidate : null,
             // A herdr-observed jsonl path is a pi session file; converge on it.
             'herdr' => $uuid !== null ? 'pi:'.$uuid : null,

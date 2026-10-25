@@ -1,0 +1,24 @@
+{
+    "hookEventName": "track_change",
+    "hook_event_name": "TrackChange",
+    "sessionId": "01a08ef9-2515-7460-89bd-5efc21f28642",
+    "cwd": "/home/you/music",
+    "workspaceRoot": "/home/you/music",
+    "track": {
+        "title": "Walking on Sunshine",
+        "artist": "KT Tunstall",
+        "album": "Kiss My Pain",
+        "durationMs": 199000,
+        "trackNumber": 3,
+        "uri": "spotify:track:7qiFf1pM6c6e8b3w9x4y1Z"
+    },
+    "previousTrack": {
+        "title": "Never Gonna Give You Up",
+        "artist": "Rick Astley",
+        "album": "Whenever You Need Somebody",
+        "durationMs": 213000,
+        "trackNumber": 1,
+        "uri": "spotify:track:4uK7t4w2cLqZv8k7hY6b5A"
+    },
+    "timestamp": "2026-09-11T06:03:00Z"
+}

@@ -24,6 +24,7 @@ class Cli
         'sessions',
         'hook',
         'opencode',
+        'music',
     ];
 
     private ?Client $client = null;
@@ -84,6 +85,7 @@ class Cli
             'sessions' => $this->sessions($positionals, $options),
             'hook' => $this->fromStdin(GrokHook::class),
             'opencode' => $this->fromStdin(OpenCodeCapture::class),
+            'music' => $this->fromStdin(MusicCapture::class),
             default => $this->usage(),
         };
     }
@@ -876,6 +878,7 @@ Usage:
   bin/agent-bus sessions get <id-or-alias>
   bin/agent-bus hook
   bin/agent-bus opencode
+  bin/agent-bus music
 
 Ids normalize to {kind}:{provider_id}; alternates resolve via the session_aliases KV bucket.
 

@@ -1,0 +1,17 @@
+{
+    "hookEventName": "playback_pause",
+    "hook_event_name": "PlaybackPause",
+    "sessionId": "01a08ef9-2515-7460-89bd-5efc21f28642",
+    "cwd": "/home/you/music",
+    "workspaceRoot": "/home/you/music",
+    "track": {
+        "title": "Never Gonna Give You Up",
+        "artist": "Rick Astley",
+        "album": "Whenever You Need Somebody",
+        "durationMs": 213000,
+        "trackNumber": 1,
+        "uri": "spotify:track:4uK7t4w2cLqZv8k7hY6b5A"
+    },
+    "positionMs": 120000,
+    "timestamp": "2026-09-11T06:01:00Z"
+}
