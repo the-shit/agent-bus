@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# bus-dash: live Agent Bus view. Polls Asgard GET /api/agent-bus/events. Needs ASGARD_URL, ASGARD_AGENT_TOKEN.
+set -uo pipefail
+since=$(date -u -d '-15 min' +%FT%TZ)
+while :; do
+  out=$(curl -fsS -m 5 -G "${ASGARD_URL:?}/api/agent-bus/events" --data-urlencode "since=$since" \
+        -H "Authorization: Bearer ${ASGARD_AGENT_TOKEN:?}") || { echo "$(date +%T) asgard unreachable"; sleep 5; continue; }
+  jq -r '.events[] | "\(.at[11:19])  \(.bot|.[0:14]|ascii_downcase)\t\(.kind)\t\(.status)\t\(.summary)\(if .ref then "  ["+.ref+"]" else "" end)"' <<<"$out"
+  n=$(jq -r '.events[-1].at // empty' <<<"$out"); [ -n "$n" ] && since=$n
+  sleep 2
+done
