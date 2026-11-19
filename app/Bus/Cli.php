@@ -127,7 +127,7 @@ class Cli
 
     /**
      * Canonical ids are dot-free by design (issue #30): the KV backing
-     * streams and the sidecar inbox filter are single-token, so a dotted id
+     * streams and the inbox subject filter are single-token, so a dotted id
      * can neither persist nor receive. Alternates are free-form — they reach
      * the bus only as hashed alias keys — but a resolved id that is not one
      * clean NATS token is a caller bug and dies loudly here.
@@ -881,7 +881,6 @@ Ids normalize to {kind}:{provider_id}; alternates resolve via the session_aliase
 
 Cold path (boots the framework):
   bin/agent-bus provision
-  bin/agent-bus sidecar [--once]
 TXT."\n");
 
         return 1;

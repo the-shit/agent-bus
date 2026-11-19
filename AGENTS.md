@@ -12,7 +12,7 @@ whole performance design.
 | Path | Verbs | Boots | Cost |
 |---|---|---|---|
 | Hot | `emit` `send` `heartbeat` `session-end` `sessions` `hook` `opencode` | Composer autoload only | ~66 ms |
-| Cold | `provision` `sidecar` `app:build` | Laravel Zero kernel | ~150 ms |
+| Cold | `provision` `monitor` `mcp` `app:build` | Laravel Zero kernel | ~150 ms |
 
 Hot verbs fire from harness hooks on **every tool call**. They must never boot
 the framework. `Cli::HOT_VERBS` is the list `bin/agent-bus` dispatches on, and
@@ -29,7 +29,7 @@ Anything needing config, the container, or `Process` belongs on the cold path.
   return arrays, and their tests never touch a container. `BusIdentity` is the
   one resolver from reporter-supplied ids to canonical `{kind}:{provider_id}`;
   it returns null rather than inventing identity. Alternates (jsonl paths, raw
-  UUIDs, pane ids) live in the `session_aliases` KV bucket under sha256 keys —
+  UUIDs, ses_* ids) live in the `session_aliases` KV bucket under sha256 keys —
   the KV backing streams use single-token subjects, so raw alternates can
   never be keys themselves (issue #30). Resolved ids are validated as one
   clean NATS token at the write boundary: dot-free by design, no stream
@@ -65,7 +65,7 @@ This is load-bearing and easy to get backwards.
 
 ```bash
 vendor/bin/pest                      # whole suite
-vendor/bin/pest --filter=sidecar     # one slice
+vendor/bin/pest --filter=inbox       # one slice
 ```
 
 NATS-backed tests skip when nothing listens on the broker port. That is for
@@ -85,5 +85,5 @@ php bin/agent-bus app:build agent-bus
 ```
 
 The compiled binary is ~30 MB and adds roughly 140 ms to the hot path, so it is
-for the sidecar and for humans. **Hooks should point at `bin/agent-bus` in a
+for long-running cold commands and for humans. **Hooks should point at `bin/agent-bus` in a
 checkout, not at the PHAR.**

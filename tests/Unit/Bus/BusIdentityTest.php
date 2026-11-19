@@ -33,25 +33,21 @@ describe('resolve', function () {
             ->and(BusIdentity::resolve('codex', ['sessionId' => PI_UUID]))->toBe('codex:'.PI_UUID);
     });
 
-    it('converges a herdr-observed jsonl path onto the pi session', function () {
-        expect(BusIdentity::resolve('herdr', ['sessionId' => PI_JSONL]))->toBe('pi:'.PI_UUID);
-    });
-
-    it('falls back to herdr:{pane_id} for panes with no provider id', function () {
-        expect(BusIdentity::resolve('herdr', ['pane_id' => 'w2:p1']))->toBe('herdr:w2:p1');
+    it('no longer mints pane-grade herdr ids', function () {
+        expect(BusIdentity::resolve('herdr', ['pane_id' => 'w2:p1']))->toBeNull()
+            ->and(BusIdentity::resolve('herdr', ['sessionId' => PI_JSONL]))->toBeNull();
     });
 
     it('returns null when no provider id exists instead of inventing one', function () {
         expect(BusIdentity::resolve('grok', ['cwd' => '/tmp/x']))->toBeNull()
             ->and(BusIdentity::resolve('grok', ['sessionId' => 'not-a-uuid']))->toBeNull()
             ->and(BusIdentity::resolve('opencode', ['sessionId' => 'oc-session-1']))->toBeNull()
-            ->and(BusIdentity::resolve('pi', []))->toBeNull()
-            ->and(BusIdentity::resolve('herdr', []))->toBeNull();
+            ->and(BusIdentity::resolve('pi', []))->toBeNull();
     });
 
     it('passes canonical ids through untouched for any kind', function () {
         expect(BusIdentity::resolve('grok', ['sessionId' => 'pi:'.PI_UUID]))->toBe('pi:'.PI_UUID)
-            ->and(BusIdentity::resolve('herdr', ['sessionId' => 'herdr:w2:p1']))->toBe('herdr:w2:p1');
+            ->and(BusIdentity::resolve('opencode', ['sessionId' => 'grok:'.PI_UUID]))->toBe('grok:'.PI_UUID);
     });
 });
 
@@ -61,26 +57,23 @@ describe('aliases', function () {
             ->and(BusIdentity::aliases('grok:'.PI_UUID, ['sessionId' => PI_UUID]))->toBe([PI_UUID]);
     });
 
-    it('records the pane id when a herdr pane converges on a real session', function () {
-        $aliases = BusIdentity::aliases('pi:'.PI_UUID, ['sessionId' => PI_JSONL, 'pane_id' => 'w2:p1']);
-
-        expect($aliases)->toContain(PI_JSONL)->toContain('w2:p1')->toContain('herdr:w2:p1');
+    it('ignores pane ids', function () {
+        expect(BusIdentity::aliases('pi:'.PI_UUID, ['sessionId' => PI_JSONL, 'pane_id' => 'w2:p1']))->toBe([PI_JSONL]);
     });
 
     it('never aliases an id to itself', function () {
-        expect(BusIdentity::aliases('herdr:w2:p1', ['pane_id' => 'w2:p1']))->toBe([]);
+        expect(BusIdentity::aliases('pi:'.PI_UUID, ['sessionId' => 'pi:'.PI_UUID]))->toBe([]);
     });
 });
 
 describe('quality and shape', function () {
-    it('flags pane-grade ids honestly', function () {
-        expect(BusIdentity::quality('herdr:w2:p1'))->toBe('pane')
-            ->and(BusIdentity::quality('pi:'.PI_UUID))->toBe('session');
+    it('reports session quality for canonical ids', function () {
+        expect(BusIdentity::quality('pi:'.PI_UUID))->toBe('session');
     });
 
-    it('recognizes canonical ids, including pane ids with colons', function () {
+    it('recognizes canonical ids and no longer treats herdr as a kind', function () {
         expect(BusIdentity::isCanonical('grok:'.PI_UUID))->toBeTrue()
-            ->and(BusIdentity::isCanonical('herdr:w2:p1'))->toBeTrue()
+            ->and(BusIdentity::isCanonical('herdr:w2:p1'))->toBeFalse()
             ->and(BusIdentity::isCanonical(PI_UUID))->toBeFalse()
             ->and(BusIdentity::isCanonical(PI_JSONL))->toBeFalse()
             ->and(BusIdentity::isCanonical('unknownkind:x'))->toBeFalse();
