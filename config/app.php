@@ -2,6 +2,7 @@
 
 use App\Providers\AppServiceProvider;
 use App\Providers\NatsServiceProvider;
+use Illuminate\Database\DatabaseServiceProvider;
 
 return [
 
@@ -12,6 +13,7 @@ return [
     'env' => 'development',
 
     'providers' => [
+        DatabaseServiceProvider::class,
         AppServiceProvider::class,
         NatsServiceProvider::class,
     ],

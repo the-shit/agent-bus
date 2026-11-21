@@ -1,8 +1,9 @@
 # Agent Bus
 
 A Laravel Zero console application. NATS JetStream carries agent presence and
-addressed messages between coding-agent sessions. There is no HTTP layer, no
-database, and no Eloquent — do not add them.
+addressed messages between coding-agent sessions. There is no HTTP layer.
+Durable history is optional: when BUS_HISTORY_DB_HOST is set, `monitor`
+fail-open dual-writes consumed envelopes to bus_events through Eloquent.
 
 ## The two paths
 

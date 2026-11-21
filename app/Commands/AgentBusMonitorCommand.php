@@ -2,6 +2,7 @@
 
 namespace App\Commands;
 
+use App\Bus\BusHistory;
 use App\Bus\NatsBus;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
@@ -35,6 +36,10 @@ class AgentBusMonitorCommand extends Command
 
         $this->info("Monitoring {$bus->streamName()}; Ctrl+C to stop.");
 
+        $history = new BusHistory(onError: function (Throwable $exception): void {
+            $this->error('bus_history persist failed: '.$exception->getMessage());
+        });
+
         $running = true;
 
         if (defined('SIGTERM') && defined('SIGINT')) {
@@ -45,10 +50,12 @@ class AgentBusMonitorCommand extends Command
 
         do {
             try {
-                $count = $bus->consumeMonitor(function (string $subject, array $envelope): void {
+                $count = $bus->consumeMonitor(function (string $subject, array $envelope, ?int $seq = null) use ($history): void {
                     if ($envelope === []) {
                         return;
                     }
+
+                    $history->persist($subject, $envelope, $seq);
 
                     $this->line('bridged '.($envelope['type'] ?? '?').' on '.$subject);
                 });
