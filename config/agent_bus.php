@@ -32,4 +32,10 @@ return [
         'expires' => (float) env('AGENT_BUS_MONITOR_EXPIRES', 0.5),
     ],
 
+    'history_store' => [
+        'enabled' => env('BUS_HISTORY_DB_HOST') !== null && env('BUS_HISTORY_DB_HOST') !== '',
+        'connection' => env('BUS_HISTORY_CONNECTION', 'bus_history'),
+        'schema' => env('BUS_HISTORY_DB_SCHEMA', 'agent-bus'),
+    ],
+
 ];

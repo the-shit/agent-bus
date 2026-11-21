@@ -21,8 +21,8 @@ return new class extends Migration
             $table->string('repo')->nullable()->index();
             $table->string('type')->index();
             $table->json('payload');
-            $table->timestamp('occurred_at')->nullable()->index();
-            $table->timestamp('received_at')->useCurrent();
+            $table->timestampTz('occurred_at')->nullable()->index();
+            $table->timestampTz('received_at')->useCurrent();
         });
     }
 
