@@ -319,6 +319,46 @@ class NatsBus
         return array_values($ids);
     }
 
+    /**
+     * The per-session durable inbox consumer that `bin/agent-bus inbox` and
+     * `listen` pull from. DeliverPolicy New skips anything published before
+     * the consumer exists, so a sender must create it first.
+     */
+    public function ensureSessionInbox(string $sessionId): void
+    {
+        $safe = preg_replace('/[^A-Za-z0-9_-]/', '-', $sessionId) ?? 'session';
+        $consumer = $this->stream()->getConsumer('agent-bus-inbox-'.$safe);
+
+        if ($consumer->exists()) {
+            return;
+        }
+
+        $consumer->getConfiguration()
+            ->setSubjectFilter('session.'.$sessionId.'.inbox')
+            ->setDeliverPolicy(DeliverPolicy::NEW)
+            ->setAckPolicy(AckPolicy::EXPLICIT);
+
+        try {
+            $consumer->create();
+        } catch (Throwable $exception) {
+            if (! $this->stream()->getConsumer('agent-bus-inbox-'.$safe)->exists()) {
+                throw $exception;
+            }
+        }
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    public function lastEnvelopeOrNull(string $subject): ?array
+    {
+        try {
+            return $this->lastEnvelope($subject);
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
     public function sidecarConsumerName(): string
     {
         $configured = config('agent_bus.sidecar.consumer');
