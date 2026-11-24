@@ -107,7 +107,7 @@ it('returns an error result when get_session misses', function () {
     expect($response['result']['isError'])->toBeTrue()
         ->and($response['result']['content'][0]['text'])
         ->toContain('not on the bus');
-});
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
 it('lists full presence records from one KV scan', function () {
     $bus = app(NatsBus::class);
