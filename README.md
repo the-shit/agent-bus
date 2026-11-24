@@ -310,3 +310,7 @@ removed), with a 60-second acknowledgement timeout, including existing durable
 consumers. Heartbeat renewal and duplicate delivery after a crash between
 handling and acknowledgement remain separate work. This is at-least-once
 transport delivery, not proof that an agent completed its task.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the code-approval and merge rule.
