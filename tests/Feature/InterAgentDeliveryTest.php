@@ -172,13 +172,13 @@ it('gives each overlapping work request to one worker and one correlated result'
         $sentB = $requestB->wait();
         $envelopeA = json_decode($sentA->output(), true);
         $envelopeB = json_decode($sentB->output(), true);
-        $beforeWorkers = Process::timeout(5)->run(['nats', 'consumer', 'info', 'AGENT_BUS', $consumer]);
+        $beforeWorkers = proveConsumerExists($consumer);
 
         expect($sentA->exitCode())->toBe(0)
             ->and($sentB->exitCode())->toBe(0)
             ->and($envelopeA['payload']['capability'])->toBe($capability)
             ->and($envelopeB['payload']['capability'])->toBe($capability)
-            ->and($beforeWorkers->exitCode())->not->toBe(0);
+            ->and($beforeWorkers)->toBeFalse();
 
         $claims = [
             proveStart(proveClaim($capability, $consumer, $workerA), [], 20),
@@ -220,10 +220,9 @@ it('gives each overlapping work request to one worker and one correlated result'
                 ->and($stored)->toBe($printed);
         }
 
-        $info = Process::timeout(5)->run(['nats', 'consumer', 'info', 'AGENT_BUS', $consumer, '--json']);
-        $consumerInfo = json_decode($info->output(), true);
+        $consumerInfo = proveConsumerInfo($consumer) ?? [];
 
-        expect($info->exitCode())->toBe(0)
+        expect(proveConsumerExists($consumer))->toBeTrue()
             ->and($consumerInfo['config']['deliver_policy'] ?? null)->toBe('all');
     } finally {
         foreach ($claims as $claim) {
@@ -232,7 +231,9 @@ it('gives each overlapping work request to one worker and one correlated result'
             }
         }
 
-        Process::timeout(5)->run(['nats', 'consumer', 'rm', 'AGENT_BUS', $consumer, '--force']);
+        if (proveConsumerExists($consumer)) {
+            app(NatsBus::class)->stream()->getConsumer($consumer)->delete();
+        }
     }
 });
 
@@ -242,11 +243,11 @@ it('refuses to claim the live code review and tool failure capabilities', functi
     foreach (['code_review', 'tool_failure_triage'] as $capability) {
         $result = proveBus(proveClaim($capability, 'agent-bus-must-not-create', proveGrokSession(), 0), [], 15);
 
-        $leftBehind = Process::timeout(5)->run(['nats', 'consumer', 'info', 'AGENT_BUS', 'agent-bus-must-not-create']);
+        $leftBehind = proveConsumerExists('agent-bus-must-not-create');
 
         expect($result->exitCode())->toBe(1)
             ->and($result->output())->toContain('refusing live capability '.$capability)
-            ->and($leftBehind->exitCode())->not->toBe(0);
+            ->and($leftBehind)->toBeFalse();
     }
 });
 
@@ -342,4 +343,29 @@ function proveStart(array $arguments, array $environment = [], int $timeout = 15
         ->timeout($timeout)
         ->env($environment)
         ->start([PHP_BINARY, base_path('bin/agent-bus'), ...$arguments]);
+}
+
+/**
+ * Read consumer state through the PHP client, not the `nats` CLI: CI has no
+ * CLI, and on Thor the CLI could pick up a context that points at the live bus.
+ *
+ * @return array<string, mixed>|null
+ */
+function proveConsumerInfo(string $name): ?array
+{
+    try {
+        $response = app(NatsBus::class)->stream()->getConsumer($name)->info();
+    } catch (Throwable) {
+        return null;
+    }
+
+    $body = is_object($response) && isset($response->body) ? (string) $response->body : '';
+    $info = json_decode($body, true);
+
+    return is_array($info) && isset($info['config']) ? $info : null;
+}
+
+function proveConsumerExists(string $name): bool
+{
+    return proveConsumerInfo($name) !== null;
 }
