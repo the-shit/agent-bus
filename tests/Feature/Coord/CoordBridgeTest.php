@@ -1,6 +1,8 @@
 <?php
 
 use App\Bus\NatsBus;
+use App\Bus\Receipt;
+use App\Coord\AttemptNotBumped;
 use App\Coord\CoordBridge;
 use App\Coord\CoordQueue;
 use Illuminate\Support\Facades\Process;
@@ -55,7 +57,7 @@ final class FakeCoordQueue implements CoordQueue
 
     public function fail(string $jobId, string $error, bool $retry = true): string
     {
-        $this->calls[] = ['fail', $jobId, $error];
+        $this->calls[] = ['fail', $jobId, $error, $retry];
 
         return 'queued';
     }
@@ -245,6 +247,7 @@ it('ignores a done receipt from a session the job was not delivered to', functio
 it('hands a claimed job back to coord when the bus fails mid-delivery, and keeps running', function () {
     $bus = Mockery::mock(NatsBus::class);
     $bus->shouldReceive('resolveSessionId')->andReturn('m6-session');
+    $bus->shouldReceive('lastEnvelopeOrNull')->andReturn(null);
     $bus->shouldReceive('ensureSessionInbox')->andThrow(new RuntimeException('NATS broker is down'));
     $coord = new FakeCoordQueue;
     $coord->claimErrors = 1;
@@ -278,4 +281,89 @@ it('hands a claimed job back to coord when the bus fails mid-delivery, and keeps
         ->and($coord->calls[0][2])->toContain('bridge error on attempt 1')
         ->and(implode("\n", $lines))->toContain('coord is down')
         ->and(implode("\n", $lines))->toContain('NATS broker is down');
+});
+
+/**
+ * A bus stand-in: publishes land in memory, and the target session answers
+ * every inbox message with a done receipt for the attempt it carried.
+ */
+function answeringBus(string $session, array &$published, array $preloaded = []): NatsBus
+{
+    $receipts = $preloaded;
+    $bus = Mockery::mock(NatsBus::class);
+    $bus->shouldReceive('resolveSessionId')->andReturn($session);
+    $bus->shouldReceive('ensureSessionInbox');
+    $bus->shouldReceive('publishEnvelope')->andReturnUsing(function (string $subject, array $envelope, ?string $msgId = null) use (&$published, &$receipts, $session): void {
+        $published[] = [$subject, $msgId];
+
+        if (str_ends_with($subject, '.inbox')) {
+            $receipts[Receipt::subject($envelope['jobId'], $envelope['attempt'], 'done')]
+                = Receipt::envelope($envelope['jobId'], $envelope['attempt'], 'done', $session, 'probe', ['exitCode' => 0]);
+        }
+    });
+    $bus->shouldReceive('lastEnvelopeOrNull')->andReturnUsing(function (string $subject) use (&$receipts): ?array {
+        return $receipts[$subject] ?? null;
+    });
+
+    return $bus;
+}
+
+it('fails loudly, without retry, when coord hands back a job with an attempt it already delivered', function () {
+    $published = [];
+    $lines = [];
+    $coord = new FakeCoordQueue;
+    $job = fakeCoordJob(1);
+    $bridge = new CoordBridge($coord, answeringBus('m6-session', $published), 'm6-session', [], 60, 2.0, log: function (string $line) use (&$lines): void {
+        $lines[] = $line;
+    });
+
+    expect($bridge->handle($job))->toBe('done');
+
+    expect(fn () => $bridge->handle($job))->toThrow(AttemptNotBumped::class, 'must bump attempt');
+
+    $fail = end($coord->calls);
+    expect($fail[0])->toBe('fail')
+        ->and($fail[1])->toBe($job['id'])
+        ->and($fail[3])->toBeFalse()
+        ->and(implode("\n", $lines))->toContain('ERROR coord returned job '.$job['id'].' with attempt 1')
+        // the stale attempt was never re-published into the inbox
+        ->and(count(array_filter($published, fn (array $p) => str_ends_with($p[0], '.inbox'))))->toBe(1)
+        // a real bump still goes through
+        ->and($bridge->handle([...$job, 'attempt' => 2]))->toBe('done');
+});
+
+it('catches a repeated attempt across a bridge restart from the bus receipts', function () {
+    $published = [];
+    $coord = new FakeCoordQueue;
+    $job = fakeCoordJob(1);
+    $stale = [Receipt::subject($job['id'], 1, 'queued') => Receipt::envelope($job['id'], 1, 'queued', 'm6-session', 'coord-bridge')];
+    $bridge = new CoordBridge($coord, answeringBus('m6-session', $published, $stale), 'm6-session', [], 60, 2.0);
+
+    expect(fn () => $bridge->handle($job))->toThrow(AttemptNotBumped::class);
+    expect($published)->toBe([])
+        ->and($coord->calls[0][0])->toBe('fail')
+        ->and($coord->calls[0][3])->toBeFalse();
+});
+
+it('keeps running after a repeated attempt and handles the next job', function () {
+    $published = [];
+    $lines = [];
+    $coord = new FakeCoordQueue;
+    $job = fakeCoordJob(1);
+    $coord->queued = [$job, $job, fakeCoordJob(1)];
+    $now = 0.0;
+    $bridge = new CoordBridge($coord, answeringBus('m6-session', $published), 'm6-session', [], 60, 2.0,
+        log: function (string $line) use (&$lines): void {
+            $lines[] = $line;
+        },
+        clock: function () use (&$now): float {
+            return $now += 0.001;
+        },
+        sleep: function (float $seconds) use (&$now): void {
+            $now += $seconds;
+        },
+    );
+
+    expect($bridge->run(maxJobs: 2, forSeconds: 60))->toBe(2)
+        ->and(implode("\n", $lines))->toContain('must bump attempt');
 });

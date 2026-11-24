@@ -43,6 +43,13 @@ final class CoordBridge
     private Closure $sleep;
 
     /**
+     * Last attempt delivered per job id, newest last (bounded).
+     *
+     * @var array<string, int>
+     */
+    private array $lastAttempt = [];
+
+    /**
      * @param  list<string>  $capabilities
      */
     public function __construct(
@@ -124,6 +131,7 @@ final class CoordBridge
     {
         $jobId = Receipt::jobId($job['id']);
         $attempt = Receipt::attempt($job['attempt'] ?? 1);
+        $this->requireBumpedAttempt($jobId, $attempt);
 
         try {
             return $this->deliver($job, $jobId, $attempt);
@@ -218,6 +226,58 @@ final class CoordBridge
         ($this->log)("job {$jobId} attempt {$attempt} timed out -> {$status}");
 
         return $status === 'queued' ? 'requeued' : 'failed';
+    }
+
+    /**
+     * coord.claim_job bumps jobs.attempt on every claim. If a job comes back
+     * with an attempt this bridge already delivered (in memory, or a receipt
+     * for that attempt from the target session on the bus), fail it loudly and without
+     * retry instead of letting JetStream de-duplicate it into silence.
+     */
+    private function requireBumpedAttempt(string $jobId, int $attempt): void
+    {
+        $previous = $this->lastAttempt[$jobId] ?? null;
+        $seen = $previous !== null && $attempt <= $previous;
+
+        if (! $seen) {
+            // Across bridge restarts: any receipt for this attempt from the
+            // session it would go to (including this bridge's own "queued").
+            $session = $this->bus->resolveSessionId($this->sessionId) ?? $this->sessionId;
+
+            foreach (Receipt::READ_ORDER as $state) {
+                $receipt = $this->bus->lastEnvelopeOrNull(Receipt::subject($jobId, $attempt, $state));
+
+                if (is_array($receipt) && (($receipt['payload']['sessionId'] ?? null) === $session)) {
+                    $seen = true;
+
+                    break;
+                }
+            }
+        }
+
+        if (! $seen) {
+            unset($this->lastAttempt[$jobId]);
+            $this->lastAttempt[$jobId] = $attempt;
+
+            if (count($this->lastAttempt) > 10_000) {
+                array_shift($this->lastAttempt);
+            }
+
+            return;
+        }
+
+        $message = "coord returned job {$jobId} with attempt {$attempt}, which was already delivered"
+            .($previous !== null ? " (last attempt {$previous})" : '')
+            .'; coord.claim_job must bump attempt on every claim';
+        ($this->log)('ERROR '.$message);
+
+        try {
+            $this->coord->fail($jobId, $message, retry: false);
+        } catch (Throwable $exception) {
+            ($this->log)("job {$jobId}: could not fail it (".self::describe($exception).')');
+        }
+
+        throw new AttemptNotBumped($message);
     }
 
     /**

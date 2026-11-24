@@ -117,49 +117,6 @@ it('redelivers a listen --exec message when the listener dies mid-command', func
     }
 })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
-it('gives the wake command a scrubbed environment, its ids, and a result file', function () {
-    app(NatsBus::class)->provision();
-    $session = 'm6-env-'.bin2hex(random_bytes(4));
-    $job = 'job-'.bin2hex(random_bytes(6));
-    $out = tempnam(sys_get_temp_dir(), 'm6-env-');
-    agentBusCli(['heartbeat', '--session='.$session, '--agent-type=probe']);
-
-    try {
-        agentBusCli(['send', '--session='.$session, '--job='.$job, '--attempt=2', '--payload={}']);
-        $listened = Process::path(base_path())->timeout(15)->env([
-            'NATS_USER' => 'probe-user',
-            'NATS_PASS' => 'probe-pass-value',
-            'NATS_TLS_KEY' => '/probe/tls.key',
-            'TYPESAFE_API_KEY' => 'probe-typesafe-value',
-            'GITHUB_TOKEN' => 'probe-gh-value',
-            'COORD_DB_PASSWORD_FILE' => '/probe/coord.pw',
-            'M6_KEEP_ME' => 'kept',
-        ])->run([
-            PHP_BINARY, base_path('bin/agent-bus'), 'listen', '--session='.$session, '--max=1', '--for=5',
-            '--exec=cat >/dev/null; env > '.escapeshellarg($out).'; printf \'{"summary":"ok","attempt":%s}\' "$AGENT_BUS_ATTEMPT" > "$AGENT_BUS_RESULT_FILE"',
-        ]);
-        $env = (string) file_get_contents($out);
-        $receipt = lastJsonLine(agentBusCli(['receipt', '--job='.$job, '--attempt=2'])->output());
-
-        expect($listened->exitCode())->toBe(0)
-            ->and($env)->toContain('M6_KEEP_ME=kept')
-            ->and($env)->toContain('AGENT_BUS_JOB_ID='.$job)
-            ->and($env)->toContain('AGENT_BUS_ATTEMPT=2')
-            ->and($env)->toContain('AGENT_BUS_SESSION_ID='.$session)
-            ->and($env)->not->toContain('probe-pass-value')
-            ->and($env)->not->toContain('probe-user')
-            ->and($env)->not->toContain('/probe/tls.key')
-            ->and($env)->not->toContain('probe-typesafe-value')
-            ->and($env)->not->toContain('probe-gh-value')
-            ->and($env)->not->toContain('/probe/coord.pw')
-            ->and($receipt['payload'] ?? [])->toMatchArray(['state' => 'done', 'attempt' => 2, 'exitCode' => 0])
-            ->and($receipt['payload']['result'] ?? null)->toBe(['summary' => 'ok', 'attempt' => 2]);
-    } finally {
-        @unlink($out);
-        agentBusCli(['session-end', '--session='.$session]);
-    }
-})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
-
 it('does not block on a wake command that never reads a large envelope', function () {
     app(NatsBus::class)->provision();
     $session = 'm6-bigstdin-'.bin2hex(random_bytes(4));
@@ -183,29 +140,6 @@ it('does not block on a wake command that never reads a large envelope', functio
     }
 })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
 
-it('scrubs credentials but keeps ordinary variables in the wake environment', function () {
-    $env = Cli::wakeEnvironment([
-        'PATH' => '/usr/bin',
-        'HOME' => '/home/probe',
-        'NATS_URL' => 'nats://127.0.0.1:4222',
-        'NATS_USER' => 'u',
-        'NATS_PASS' => 'p',
-        'NATS_TOKEN' => 't',
-        'NATS_NKEY' => 'n',
-        'NATS_CREDS' => '/c',
-        'NATS_TLS_CERT' => '/cert',
-        'TYPESAFE_API_KEY' => 'k',
-        'COORD_DB_PASSWORD_FILE' => '/pw',
-        'OPENAI_API_KEY' => 'k',
-        'AWS_SECRET_ACCESS_KEY' => 's',
-        'DB_PASSWORD' => 'p',
-        'AGENT_BUS_SESSION_ID' => 'probe',
-    ]);
-
-    expect(array_keys($env))->toBe(['PATH', 'HOME', 'NATS_URL', 'AGENT_BUS_SESSION_ID'])
-        ->and(Cli::wakeEnvironment(['NATS_URL' => 'nats://user:secret@127.0.0.1:4222']))->toBe([]);
-});
-
 it('refuses a coord password file that group or other can read', function () {
     $file = tempnam(sys_get_temp_dir(), 'm6-pw-');
     file_put_contents($file, 'not-a-real-password');
@@ -220,4 +154,206 @@ it('refuses a coord password file that group or other can read', function () {
     } finally {
         unlink($file);
     }
+});
+
+/** Secrets an agent box commonly holds; none may reach a wake command unless passed. */
+function wakeSecretEnv(): array
+{
+    return [
+        'APP_KEY' => 'base64:probe-app-key',
+        'DATABASE_URL' => 'postgres://probe:probe-db-pass@127.0.0.1/db',
+        'REDIS_URL' => 'redis://:probe-redis-pass@127.0.0.1:6379',
+        'SUPABASE_SERVICE_ROLE_KEY' => 'probe-supabase-key',
+        'XAI_KEY' => 'probe-xai-key',
+        'MYSQL_PWD' => 'probe-mysql-pwd',
+        'SENTRY_DSN' => 'https://probe-sentry@o0.ingest.sentry.io/0',
+        'SLACK_WEBHOOK_URL' => 'https://hooks.slack.com/services/PROBE/SLACK/HOOK',
+        'SLACK_WEBHOOK' => 'https://hooks.slack.com/services/PROBE/SLACK/HOOK2',
+        'DOCKER_AUTH_CONFIG' => '{"auths":{"probe":{"auth":"cHJvYmU="}}}',
+        'SSH_AUTH_SOCK' => '/tmp/probe-ssh-agent.sock',
+        'NATS_USER' => 'probe-nats-user',
+        'NATS_PASS' => 'probe-nats-pass',
+        'NATS_PASSWORD' => 'probe-nats-password',
+        'TYPESAFE_API_KEY' => 'probe-typesafe-key',
+        'AWS_ACCESS_KEY_ID' => 'probe-aws-id',
+        'XDG_RUNTIME_DIR' => '/run/user/probe',
+    ];
+}
+
+it('passes only allowlisted variables, the job ids, and --pass-env names to the wake command', function () {
+    app(NatsBus::class)->provision();
+    $session = 'm6-env-'.bin2hex(random_bytes(4));
+    $job = 'job-'.bin2hex(random_bytes(6));
+    $out = tempnam(sys_get_temp_dir(), 'm6-env-');
+    agentBusCli(['heartbeat', '--session='.$session, '--agent-type=probe']);
+
+    try {
+        agentBusCli(['send', '--session='.$session, '--job='.$job, '--attempt=2', '--payload={}']);
+        $listened = Process::path(base_path())->timeout(15)->env([
+            ...wakeSecretEnv(),
+            'M6_PASSED' => 'passed-value',
+            'M6_NOT_PASSED' => 'not-passed-value',
+            'LC_ALL' => 'C.UTF-8',
+            'TZ' => 'America/Phoenix',
+        ])->run([
+            PHP_BINARY, base_path('bin/agent-bus'), 'listen', '--session='.$session, '--max=1', '--for=5',
+            '--pass-env=M6_PASSED', '--pass-env', 'XAI_KEY',
+            '--exec=cat >/dev/null; env > '.escapeshellarg($out).'; printf \'{"summary":"ok","attempt":%s}\' "$AGENT_BUS_ATTEMPT" > "$AGENT_BUS_RESULT_FILE"',
+        ]);
+        $env = [];
+        foreach (array_filter(explode("\n", (string) file_get_contents($out))) as $line) {
+            [$name, $value] = array_pad(explode('=', $line, 2), 2, '');
+            $env[$name] = $value;
+        }
+        $receipt = lastJsonLine(agentBusCli(['receipt', '--job='.$job, '--attempt=2'])->output());
+        $leaked = array_diff_key(array_intersect_key($env, wakeSecretEnv()), ['XAI_KEY' => true]);
+
+        expect($listened->exitCode())->toBe(0)
+            ->and($leaked)->toBe([])
+            ->and($env)->not->toHaveKey('M6_NOT_PASSED')
+            ->and($env['M6_PASSED'] ?? null)->toBe('passed-value')
+            ->and($env['XAI_KEY'] ?? null)->toBe('probe-xai-key')
+            ->and($env['LC_ALL'] ?? null)->toBe('C.UTF-8')
+            ->and($env['TZ'] ?? null)->toBe('America/Phoenix')
+            ->and($env)->toHaveKeys(['PATH', 'HOME', 'AGENT_BUS_JOB_ID', 'AGENT_BUS_ATTEMPT', 'AGENT_BUS_SESSION_ID', 'AGENT_BUS_RESULT_FILE'])
+            ->and($env['AGENT_BUS_JOB_ID'])->toBe($job)
+            ->and($env['AGENT_BUS_ATTEMPT'])->toBe('2')
+            ->and($env)->not->toHaveKey('NATS_URL')
+            ->and($receipt['payload'] ?? [])->toMatchArray(['state' => 'done', 'attempt' => 2, 'exitCode' => 0])
+            ->and($receipt['payload']['result'] ?? null)->toBe(['summary' => 'ok', 'attempt' => 2]);
+    } finally {
+        @unlink($out);
+        agentBusCli(['session-end', '--session='.$session]);
+    }
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+it('keeps only the allowlist and named pass-through variables', function () {
+    $env = Cli::wakeEnvironment([
+        ...wakeSecretEnv(),
+        'PATH' => '/usr/bin',
+        'HOME' => '/home/probe',
+        'USER' => 'probe',
+        'LANG' => 'C.UTF-8',
+        'LC_TIME' => 'C',
+        'TZ' => 'UTC',
+        'TMPDIR' => '/tmp',
+        'TERM' => 'dumb',
+        'NATS_URL' => 'nats://127.0.0.1:4222',
+    ], ['SSH_AUTH_SOCK']);
+
+    expect(array_keys($env))->toBe(['SSH_AUTH_SOCK', 'PATH', 'HOME', 'USER', 'LANG', 'LC_TIME', 'TZ', 'TMPDIR', 'TERM'])
+        ->and(Cli::passEnvNames('A, B_2,A'))->toBe(['A', 'B_2'])
+        ->and(fn () => Cli::passEnvNames('BAD-NAME'))->toThrow(InvalidArgumentException::class);
+});
+
+it('kills a wake command that runs past --exec-timeout and does not redeliver it', function () {
+    app(NatsBus::class)->provision();
+    $session = 'm6-timeout-'.bin2hex(random_bytes(4));
+    $job = 'job-'.bin2hex(random_bytes(6));
+    $pidFile = tempnam(sys_get_temp_dir(), 'm6-timeout-');
+    agentBusCli(['heartbeat', '--session='.$session, '--agent-type=probe']);
+
+    try {
+        agentBusCli(['send', '--session='.$session, '--job='.$job, '--payload={}']);
+        $started = microtime(true);
+        $listened = Process::path(base_path())->timeout(20)->run([
+            PHP_BINARY, base_path('bin/agent-bus'), 'listen', '--session='.$session, '--max=1', '--for=15',
+            '--exec-timeout=1', '--exec=cat >/dev/null; sleep 30 & echo $! > '.escapeshellarg($pidFile).'; wait',
+        ]);
+        $elapsed = microtime(true) - $started;
+        $sleepPid = (int) trim((string) file_get_contents($pidFile));
+        usleep(200_000);
+        $info = wakeConsumerInfo($session);
+        $receipt = lastJsonLine(agentBusCli(['receipt', '--job='.$job])->output());
+
+        expect($listened->exitCode())->toBe(0)
+            ->and($elapsed)->toBeLessThan(8.0)
+            ->and($listened->errorOutput())->toContain('timed out')
+            ->and($sleepPid)->toBeGreaterThan(1)
+            // the whole process group is gone, not just the shell
+            ->and(posix_kill($sleepPid, 0))->toBeFalse()
+            ->and($receipt['payload'] ?? [])->toMatchArray(['state' => 'failed', 'exitCode' => 124, 'reason' => 'timeout'])
+            ->and($info['num_ack_pending'] ?? null)->toBe(0)
+            ->and($info['num_pending'] ?? null)->toBe(0);
+    } finally {
+        killWakeChild($pidFile);
+        @unlink($pidFile);
+        agentBusCli(['session-end', '--session='.$session]);
+    }
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+it('terminates a message that keeps killing the listener once it passes the redelivery cap', function () {
+    app(NatsBus::class)->provision();
+    $session = 'm6-cap-'.bin2hex(random_bytes(4));
+    $job = 'job-'.bin2hex(random_bytes(6));
+    $pidFile = tempnam(sys_get_temp_dir(), 'm6-cap-');
+    unlink($pidFile);
+    $ran = $pidFile.'-ran';
+    $env = ['AGENT_BUS_INBOX_ACK_WAIT_SECONDS' => '1', 'AGENT_BUS_INBOX_MAX_DELIVERIES' => '1'];
+    agentBusCli(['heartbeat', '--session='.$session, '--agent-type=probe']);
+
+    try {
+        // send creates the consumer with these limits (ack wait 1 s, cap 1).
+        agentBusCli(['send', '--session='.$session, '--job='.$job, '--payload={}'], $env);
+        $first = Process::path(base_path())->timeout(20)->env($env)->start([
+            PHP_BINARY, base_path('bin/agent-bus'), 'listen', '--session='.$session, '--max=1', '--for=15',
+            '--exec=cat >/dev/null; sleep 30 & echo $! > '.escapeshellarg($pidFile).'; wait',
+        ]);
+        $deadline = microtime(true) + 10;
+        while (! is_file($pidFile) && microtime(true) < $deadline) {
+            usleep(50_000);
+        }
+        usleep(100_000);
+        $first->signal(SIGKILL);
+        killWakeChild($pidFile);
+        $first->wait();
+        usleep(1_500_000); // past the 1 s ack wait
+
+        $second = Process::path(base_path())->timeout(20)->env($env)->run([
+            PHP_BINARY, base_path('bin/agent-bus'), 'listen', '--session='.$session, '--max=1', '--for=8',
+            '--exec=touch '.escapeshellarg($ran),
+        ]);
+        usleep(200_000);
+        $info = wakeConsumerInfo($session);
+        $receipt = lastJsonLine(agentBusCli(['receipt', '--job='.$job])->output());
+
+        expect($second->exitCode())->toBe(0)
+            ->and($second->errorOutput())->toContain('delivered 2 times (cap 1)')
+            ->and(is_file($ran))->toBeFalse()
+            ->and($receipt['payload'] ?? [])->toMatchArray(['state' => 'failed', 'reason' => 'redelivery cap', 'deliveries' => 2])
+            ->and($info['config']['max_deliver'] ?? null)->toBe(2)
+            ->and($info['config']['ack_wait'] ?? null)->toBe(1_000_000_000)
+            ->and($info['num_ack_pending'] ?? null)->toBe(0);
+    } finally {
+        killWakeChild($pidFile);
+        @unlink($pidFile);
+        @unlink($ran);
+        agentBusCli(['session-end', '--session='.$session]);
+    }
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+it('reads the delivery count from both JetStream ack subject forms', function () {
+    expect(Cli::deliveryCount('$JS.ACK.AGENT_BUS.agent-bus-inbox-x.3.10.4.1700000000000000000.0'))->toBe(3)
+        ->and(Cli::deliveryCount('$JS.ACK.hub.ACCHASH.AGENT_BUS.agent-bus-inbox-x.5.10.4.1700000000000000000.0.tok'))->toBe(5)
+        ->and(Cli::deliveryCount('_INBOX.abc'))->toBe(1)
+        ->and(Cli::deliveryCount(null))->toBe(1);
+});
+
+it('validates --exec-timeout', function () {
+    expect(Cli::execTimeout('2.5'))->toBe(2.5)
+        ->and(Cli::execTimeout('0'))->toBe(0.0)
+        ->and(fn () => Cli::execTimeout('soon'))->toThrow(InvalidArgumentException::class);
+});
+
+it('refuses a claim_job row without a bumped attempt', function (array $row) {
+    PdoCoordQueue::claimedJob(['id' => 'f00', 'capability' => 'c', 'payload' => '{}', 'request_id' => null, ...$row]);
+})->throws(RuntimeException::class)->with([
+    'no attempt' => [[]],
+    'attempt 0' => [['attempt' => 0]],
+    'garbage' => [['attempt' => 'x']],
+]);
+
+it('maps a claim_job row with its attempt', function () {
+    expect(PdoCoordQueue::claimedJob(['id' => 'f00', 'capability' => 'c', 'payload' => '{"a":1}', 'request_id' => null, 'attempt' => 2]))
+        ->toMatchArray(['id' => 'f00', 'attempt' => 2, 'payload' => ['a' => 1]]);
 });

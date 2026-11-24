@@ -154,6 +154,28 @@ final class PdoCoordQueue implements CoordQueue
             return null;
         }
 
+        return self::claimedJob($row);
+    }
+
+    /**
+     * Map a claim_job row. A claimed job always has attempt >= 1 (claim_job
+     * bumps it); anything else means the schema changed, so fail loudly.
+     *
+     * @param  array<string, mixed>  $row
+     * @return array{id: string, capability: string, payload: array<string, mixed>, request_id: ?string, attempt: int}
+     */
+    public static function claimedJob(array $row): array
+    {
+        $attempt = $row['attempt'] ?? null;
+
+        if (! is_int($attempt) && ! (is_string($attempt) && ctype_digit($attempt))) {
+            throw new RuntimeException('coord.claim_job returned no attempt for job '.(string) ($row['id'] ?? '?').'; refusing to guess attempt 1.');
+        }
+
+        if ((int) $attempt < 1) {
+            throw new RuntimeException('coord.claim_job returned attempt '.(int) $attempt.' for job '.(string) ($row['id'] ?? '?').'; a claimed job must have attempt >= 1.');
+        }
+
         $payload = json_decode((string) ($row['payload'] ?? '{}'), true);
 
         return [
@@ -161,7 +183,7 @@ final class PdoCoordQueue implements CoordQueue
             'capability' => (string) ($row['capability'] ?? ''),
             'payload' => is_array($payload) ? $payload : [],
             'request_id' => isset($row['request_id']) ? (string) $row['request_id'] : null,
-            'attempt' => max(1, (int) ($row['attempt'] ?? 1)),
+            'attempt' => (int) $attempt,
         ];
     }
 

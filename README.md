@@ -148,7 +148,8 @@ bin/agent-bus session-end --session 01a08ef9-2515-7460-89bd-5efc21f28642
 The addressed inbox delivers **at most once**:
 
 - `inbox` acknowledges a message when it is pulled, before the agent acts on it. If the agent crashes after the pull, the message is gone.
-- `listen --exec` is the exception: it acknowledges only after the command exits and keeps the ack deadline fresh while it runs, so a listener that dies mid-command gets the message redelivered (at least once). Make wake commands safe to repeat for the same job id and attempt.
+- `listen --exec` is the exception: it acknowledges only after the command exits and keeps the ack deadline fresh while it runs, so a listener that dies mid-command gets the message redelivered (at least once). A message delivered more than `AGENT_BUS_INBOX_MAX_DELIVERIES` times (default 3) is terminated without running the command, logged, and receipted `failed`.
+- **Wake commands must be idempotent per job id and attempt.** Besides redelivery, if `coord-bridge` sees a real `done` but `complete_job` then throws (coord down), the bridge fails the attempt with a retry and coord runs the job again as the next attempt.
 - An inbox consumer nobody pulls from for 7 days (`AGENT_BUS_INBOX_INACTIVE_SECONDS`, 0 = never) is removed by NATS, with its unread mail.
 - `session-end` deletes the session's inbox consumer, and unread mail goes with it.
 - Every sender (CLI `send` and MCP `send`) creates the target's inbox consumer before publishing. The consumer uses DeliverPolicy New, so a message published before the consumer exists would never be delivered.
@@ -208,11 +209,24 @@ receipt's `result` (and the coord job's result). While the command runs, the
 listener extends the message's ack deadline and, with `--agent-type`, refreshes
 presence every 30 s.
 
-The command does **not** inherit credentials: `NATS_*` (except a `NATS_URL`
-without `user:pass@`), `TYPESAFE_*`, `COORD_DB_*`, and any variable whose name
-looks like a secret (`*TOKEN*`, `*SECRET*`, `*PASSW*`, `*API_KEY*`,
-`*PRIVATE_KEY*`, `*CREDENTIAL*`, `*NKEY*`, `*_AUTH`) are removed. Pass what a
-wake command needs some other way (its own config file).
+The command's environment is an **allowlist**: `PATH`, `HOME`, `USER`,
+`LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `TERM`, the four
+`AGENT_BUS_*` job variables above, and any name given with `--pass-env NAME`
+(repeatable, or comma-separated). Everything else stays out, including
+`NATS_URL` and NATS credentials, `TYPESAFE_API_KEY`, database and Redis URLs,
+`SSH_AUTH_SOCK` and `XDG_RUNTIME_DIR`. A command that calls `bin/agent-bus`
+itself needs `--pass-env NATS_URL` (and the NATS credentials it should have).
+
+`--exec-timeout=<seconds>` (or `AGENT_BUS_EXEC_TIMEOUT`, default 900, 0 = no
+limit) bounds the command. It runs in its own process group; past the limit
+the group gets SIGTERM, then SIGKILL 5 s later. The message is terminated (not
+redelivered) and receipted `failed` with `exitCode` 124 and `reason: timeout`,
+so `coord-bridge` fails the attempt and coord can retry it as the next attempt.
+
+New inbox consumers are created with `max_deliver` = cap + 1 (so the listener
+sees the over-cap delivery and can receipt it), an ack wait of
+`AGENT_BUS_INBOX_ACK_WAIT_SECONDS` (default 30), and the 7-day inactive
+threshold. Existing consumers keep their old settings until they are recreated.
 
 ### coord bridge
 
@@ -228,6 +242,13 @@ sbprod `coord` is the source of truth for jobs, and the bus only carries job ids
    `fail_job` with a retry. A requeued job is claimed again as the next attempt
    and delivered again.
 
+The bridge asserts that coord bumps `attempt` on every claim. A claim row with
+no attempt, or attempt < 1, is an error. A job that comes back with an attempt
+this bridge already delivered (in memory, or any receipt for that attempt from
+the target session on the bus, which survives a bridge restart) is failed
+**without retry** and logged as `ERROR ... coord.claim_job must bump attempt`,
+instead of being silently de-duplicated by JetStream.
+
 It never claims work for a session that is not on the bus. On any error after a
 claim (bus or coord down) it calls `fail_job` with a retry, so a job is never
 left leased, then backs off (1 s doubling to 30 s) and keeps running; if even
@@ -237,10 +258,26 @@ call.
 
 Who may finish a job: only a `done`/`failed` receipt whose `sessionId` is the
 session the bridge delivered to, for the attempt it delivered, moves the coord
-job; receipts from any other session are ignored. The bus has no per-sender
-authentication, so this stops strays and other sessions, not a client that holds
-broker credentials. To enforce it, give each session its own NATS user and limit
-publish on `work.receipt.>` with NATS permissions.
+job; receipts from any other session are ignored. **This is advisory.** The bus
+has no per-sender authentication, so anyone with broker credentials can publish
+a receipt naming the target session (or publish a later spoof that masks the
+real `done`, so the attempt times out). Real enforcement needs all three of:
+
+1. per-agent NATS users;
+2. the session in the receipt subject
+   (`work.receipt.{jobId}.{attempt}.{session}.{state}`), with the bridge reading
+   only its delivered session's subject;
+3. NATS permissions that let each agent user publish only on its own session's
+   receipts (`work.receipt.*.*.<its-session>.>`) and subscribe only to its own
+   `session.<its-session>.inbox`.
+
+That is not built yet.
+
+**Upgrade together.** Receipt subjects moved from `work.receipt.{jobId}.{state}`
+to `work.receipt.{jobId}.{attempt}.{state}`, and the inbox msg-id from
+`inbox:{session}:{jobId}` to `inbox:{session}:{jobId}:{attempt}`. Mixed versions
+miss each other's receipts. Upgrade the Thor CLI (`bin/agent-bus`), every running
+`coord-bridge`, and the house `agent_bus_send` tool at the same time.
 
 Configure it with `COORD_DB_HOST`, `COORD_DB_PORT` (15442), `COORD_DB_USER`
 (`<role>.sbprod`), and `COORD_DB_PASSWORD_FILE`. The bridge refuses a password
@@ -295,8 +332,13 @@ NATS_URL=nats://odin:4222 bin/agent-bus work-request \
   --wait=600
 ```
 
-The worker invokes Pi with `ollama/qwen3-coder-next:48k`, the reviewer persona,
-and only `read`, `grep`, `find`, and `ls`. Requests are passed as argument-array
+The worker invokes Pi with `ollama/qwen3-coder-next:48k` and the reviewer
+persona. **Behaviour change:** by default it now runs with `--no-tools
+--no-mcp` in the system temp dir (`AGENT_BUS_QWEN_REVIEW_CWD`), so the reviewer
+sees only the prompt. Set `AGENT_BUS_QWEN_REVIEW_TOOLS=read,grep,find,ls` to
+give it read tools; it then refuses a cwd in this checkout, in `$HOME`, or in any
+directory holding env, key or credential files. `--no-mcp` and `--no-tools`
+need a Pi that has them: Pi 1.6.0 on Thor does (`pi --help` lists both). Requests are passed as argument-array
 values rather than through a shell. Process failures return bounded generic
 errors so prompts and process arguments do not leak into result subjects.
 
