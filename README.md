@@ -6,7 +6,9 @@
 
 Coding agents that can't see each other are just expensive tabs. This is the bus they board.
 
-NATS JetStream so Grok Build and OpenCode sessions can discover peers, subscribe to tool calls and idle, and send JSON to a live session — no pasting into someone else's TUI.
+NATS JetStream so any agent process can discover peers, advertise capabilities,
+receive addressed JSON, and claim specialized work — no shared terminal manager
+required.
 
 Laravel Zero 13 console app. First clients board **this** NATS bus (JetStream `AGENT_BUS` + KV `sessions`). Not Cloudflare Durable Objects.
 
@@ -34,7 +36,10 @@ Two agents on the same machine still work like strangers. You copy a path into c
 }
 ```
 
-- **Subjects:** `repo.{owner}.{name}.{event}` for fan-out. `session.{sessionId}.inbox` for addressed send.
+- **Subjects:** `repo.{owner}.{name}.{event}` for fan-out,
+  `session.{sessionId}.inbox` for addressed send, and
+  `work.request.{capability}.{requestId}` / `work.result.{requestId}` for
+  specialized work.
 - **Presence:** NATS KV bucket `sessions`. MCP `list_sessions` reads KV. Pane lists are a local adapter, not the registry.
 - **Capture:** harness hooks. Not the session `events.jsonl` dump. One Researcher session already logged 10,714 events, 10,639 of them `phase_changed`. That noise stays on disk.
 
@@ -51,7 +56,7 @@ Hooks already get `sessionId`, `cwd`, `toolName` on stdin. `agent-bus emit`
 publishes. The framework does not boot on every tool call.
 
 - **Send:** MCP/CLI `send` publishes to `session.{id}.inbox`. The receiving process pulls and owns delivery; no terminal multiplexer or pane injection is involved. Prove: two agents, one send, the other receives the JSON. No paste.
-- **First clients:** Grok Build and OpenCode.
+- **First clients:** Pi, Grok Build, and OpenCode.
 
 ## First four
 
@@ -104,8 +109,8 @@ checkout, PHP 8.4:
 
 | Path | Verbs | Cost |
 |---|---|---|
-| Hot | `emit` `send` `heartbeat` `session-end` `sessions` `hook` `opencode` | 66 ms |
-| Cold | `provision` `monitor` `mcp` `app:build` | 150 ms |
+| Hot | `emit` `send` `inbox` `heartbeat` `session-end` `sessions` `work-request` `work-result` `hook` `opencode` | 66 ms |
+| Cold | `provision` `monitor` `mcp` `judge` `specialist` `app:build` | 150 ms |
 
 A test runs every hot verb in a subprocess and fails if a single framework class
 gets loaded.
@@ -118,7 +123,9 @@ bin/agent-bus emit --type=toolCall --payload='{"tool":"composer"}'
 bin/agent-bus send --session 01a08ef9-2515-7460-89bd-5efc21f28642 --payload='{"text":"ping"}'
 # unknown session: fail closed
 
-bin/agent-bus heartbeat --session 01a08ef9-2515-7460-89bd-5efc21f28642
+bin/agent-bus inbox --session 01a08ef9-2515-7460-89bd-5efc21f28642
+bin/agent-bus heartbeat --session 01a08ef9-2515-7460-89bd-5efc21f28642 \
+  --agent-type=pi --capabilities=code_review,tool_failure_triage
 bin/agent-bus sessions
 # JSON array of presence records (sessionId, agentType, lastSeen, …)
 bin/agent-bus sessions --ids
@@ -148,6 +155,52 @@ A PostToolUse / `tool.execute.after` for `run_terminal_command` publishes **one*
 To board every Grok session on the machine, copy `hooks/grok.json` to `~/.grok/hooks/` and replace `/ABS/PATH/TO/agent-bus` with this checkout. Do not install that from CI.
 
 Heartbeat PUTs presence JSON (`sessionId`, `agentType`, `repo`, `lastSeen`). `sessions` lists the id. Stop heartbeats: the KV key is gone within 90s. `sessionEnd` deletes immediately.
+
+## Specialized work and Jev
+
+Workers advertise comma-separated capabilities in heartbeat presence. A caller
+publishes one correlated request and may wait for its result:
+
+```bash
+bin/agent-bus work-request \
+  --capability=tool_failure_triage \
+  --agent-type=pi \
+  --session=pi:requester \
+  --payload='{"tool":"bash","argumentShape":"object","argumentCount":1,"errorSignals":["permission_denied"],"errorLengthBucket":"short","hasStackTrace":false,"retrySafe":false}' \
+  --wait=8
+```
+
+`bin/agent-bus judge` is the first capability worker. It consumes
+`tool_failure_triage`, asks TypeSafe Jev for one bounded classification, then
+applies deterministic local policy. The response is advisory and always marks
+`automatic: false`; it never retries a tool, grants permission, or executes a
+command. Before the external request, failures are projected onto a fixed signal
+schema (tool name, argument shape/count, coarse error flags, length bucket,
+stack-trace boolean, and retry safety). Raw arguments and error text are never
+sent to TypeSafe. `TYPESAFE_API_KEY` belongs on the worker, not in every agent
+process.
+
+All workers in one capability pool share a durable consumer, so one request is
+owned by one worker. Qwen code review, Grok image generation, and game building
+can use the same subject contract without becoming Herdr agents.
+
+The first Pi specialist profile is a read-only local Qwen reviewer:
+
+```bash
+NATS_URL=nats://odin:4222 bin/agent-bus specialist qwen-reviewer
+
+NATS_URL=nats://odin:4222 bin/agent-bus work-request \
+  --capability=code_review \
+  --agent-type=pi \
+  --session=pi:requester \
+  --payload='{"prompt":"Review app/Bus for delivery and security defects."}' \
+  --wait=600
+```
+
+The worker invokes Pi with `ollama/qwen3-coder-next:48k`, the reviewer persona,
+and only `read`, `grep`, `find`, and `ls`. Requests are passed as argument-array
+values rather than through a shell. Process failures return bounded generic
+errors so prompts and process arguments do not leak into result subjects.
 
 [Pint and Pest](https://github.com/the-shit/agent-bus/actions/workflows/tests.yml) run on every pull request.
 

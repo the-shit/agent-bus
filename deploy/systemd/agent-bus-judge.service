@@ -1,0 +1,23 @@
+[Unit]
+Description=Agent Bus Jev judgment specialist
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/the-shit/agent-bus
+EnvironmentFile=%h/.config/agent-bus/agent-bus.env
+ExecStart=%h/Projects/the-shit/agent-bus/bin/agent-bus judge
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target
+
