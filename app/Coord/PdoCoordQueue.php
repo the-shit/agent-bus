@@ -154,7 +154,15 @@ final class PdoCoordQueue implements CoordQueue
             return null;
         }
 
-        return self::claimedJob($row);
+        try {
+            return self::claimedJob($row);
+        } catch (RuntimeException $exception) {
+            // The job is claimed now. Retrying would loop claim -> error ->
+            // lease expiry forever, so fail it for good with the reason.
+            $this->fail((string) $row['id'], 'agent-bus refused the claim: '.$exception->getMessage(), retry: false);
+
+            throw $exception;
+        }
     }
 
     /**

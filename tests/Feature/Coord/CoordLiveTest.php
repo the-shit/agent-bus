@@ -47,7 +47,7 @@ it('AT-6 via coord: a job inserted for an idle Thor session wakes it, and coord 
         'COORD_DB_PASSWORD_FILE' => (string) getenv('COORD_TEST_WORKER_PASSWORD_FILE'),
     ])->start([
         PHP_BINARY, base_path('bin/agent-bus'), 'coord-bridge', '--session='.$session,
-        '--capabilities='.$capability, '--max=1', '--for=20', '--lease=60', '--wait=10',
+        '--capabilities='.$capability, '--max=1', '--for=20', '--lease=60', '--wait=30',
     ]);
 
     try {
@@ -107,7 +107,7 @@ it('re-handles a requeued coord job: attempt 1 fails, coord requeues it, attempt
         'COORD_DB_PASSWORD_FILE' => (string) getenv('COORD_TEST_WORKER_PASSWORD_FILE'),
     ])->start([
         PHP_BINARY, base_path('bin/agent-bus'), 'coord-bridge', '--session='.$session,
-        '--capabilities='.$capability, '--max=2', '--for=30', '--lease=60', '--wait=10',
+        '--capabilities='.$capability, '--max=2', '--for=30', '--lease=60', '--wait=30',
     ]);
 
     try {

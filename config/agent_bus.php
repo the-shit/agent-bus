@@ -69,7 +69,8 @@ return [
                 // Bus prompts are untrusted. With no tools the reviewer only sees
                 // the prompt. Read tools need an explicit scratch checkout with no
                 // secrets in it (see PiSpecialistWorker::assertSandboxed).
-                'cwd' => env('AGENT_BUS_QWEN_REVIEW_CWD', ScratchDir::path()),
+                // Resolved only when the env var is unset, not on every boot.
+                'cwd' => env('AGENT_BUS_QWEN_REVIEW_CWD') ?: ScratchDir::path(),
                 'tools' => array_values(array_filter(explode(',', (string) env('AGENT_BUS_QWEN_REVIEW_TOOLS', '')))),
                 'timeout' => (int) env('AGENT_BUS_QWEN_REVIEW_TIMEOUT', 600),
             ],

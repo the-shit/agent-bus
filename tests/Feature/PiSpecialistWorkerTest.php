@@ -160,15 +160,26 @@ function specialistTestProfile(): array
     ];
 }
 
+afterEach(function () {
+    $dir = $GLOBALS['agentBusSpecialistScratch'] ?? null;
+    unset($GLOBALS['agentBusSpecialistScratch']);
+
+    if (is_string($dir) && is_dir($dir)) {
+        rmdir($dir);
+    }
+});
+
+/** One random, empty scratch dir per test, removed in afterEach. */
 function specialistScratchDir(): string
 {
-    // Outside the checkout even when TMPDIR points inside it (CI runners).
-    $dir = ScratchDir::path().'/agent-bus-specialist-test';
-    if (! is_dir($dir)) {
+    if (! isset($GLOBALS['agentBusSpecialistScratch'])) {
+        // Outside the checkout even when TMPDIR points inside it (CI runners).
+        $dir = ScratchDir::path().'/agent-bus-specialist-test-'.bin2hex(random_bytes(4));
         mkdir($dir, 0700, true);
+        $GLOBALS['agentBusSpecialistScratch'] = $dir;
     }
 
-    return $dir;
+    return $GLOBALS['agentBusSpecialistScratch'];
 }
 
 /**

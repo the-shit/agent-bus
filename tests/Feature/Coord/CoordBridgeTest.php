@@ -1,10 +1,12 @@
 <?php
 
+use App\Bus\Cli;
 use App\Bus\NatsBus;
 use App\Bus\Receipt;
 use App\Coord\AttemptNotBumped;
 use App\Coord\CoordBridge;
 use App\Coord\CoordQueue;
+use App\Coord\PdoCoordQueue;
 use Illuminate\Support\Facades\Process;
 use LaravelNats\Laravel\Facades\NatsV2;
 
@@ -97,7 +99,7 @@ it('delivers a claimed coord job to the session by job id and completes it from 
 
     try {
         usleep(800_000);
-        $outcome = (new CoordBridge($coord, $bus, $session, ['m6-probe'], 60, 10.0))->handle($job);
+        $outcome = (new CoordBridge($coord, $bus, $session, ['m6-probe'], 60, 30.0))->handle($job);
         $listener->wait();
         $woke = json_decode((string) file_get_contents($out), true);
 
@@ -134,7 +136,7 @@ it('fails the coord job (retry) when the session reports failed', function () {
 
     try {
         usleep(800_000);
-        $outcome = (new CoordBridge($coord, $bus, $session, [], 60, 10.0))->handle($job);
+        $outcome = (new CoordBridge($coord, $bus, $session, [], 60, 30.0))->handle($job);
         $listener->wait();
 
         expect($outcome)->toBe('requeued')
@@ -198,7 +200,7 @@ it('re-handles a requeued coord job: attempt 2 is delivered again and completes 
 
     try {
         usleep(800_000);
-        $bridge = new CoordBridge($coord, $bus, $session, [], 60, 10.0);
+        $bridge = new CoordBridge($coord, $bus, $session, [], 60, 30.0);
         $outcome1 = $bridge->handle($first);
         $outcome2 = $bridge->handle($second);
         $listener->wait();
@@ -294,7 +296,7 @@ function answeringBus(string $session, array &$published, array $preloaded = [])
     $bus->shouldReceive('resolveSessionId')->andReturn($session);
     $bus->shouldReceive('ensureSessionInbox');
     $bus->shouldReceive('publishEnvelope')->andReturnUsing(function (string $subject, array $envelope, ?string $msgId = null) use (&$published, &$receipts, $session): void {
-        $published[] = [$subject, $msgId];
+        $published[] = [$subject, $msgId, $envelope];
 
         if (str_ends_with($subject, '.inbox')) {
             $receipts[Receipt::subject($envelope['jobId'], $envelope['attempt'], 'done')]
@@ -317,7 +319,12 @@ it('fails loudly, without retry, when coord hands back a job with an attempt it 
         $lines[] = $line;
     });
 
+    $before = Receipt::nowMs();
     expect($bridge->handle($job))->toBe('done');
+    // The inbox envelope tells listen --exec when the bridge stops waiting.
+    $inbox = array_values(array_filter($published, fn (array $p) => str_ends_with($p[0], '.inbox')))[0][2];
+    expect($inbox['deadlineMs'])->toBeGreaterThanOrEqual($before + 2000)
+        ->and($inbox['deadlineMs'])->toBeLessThan($before + 3000);
 
     expect(fn () => $bridge->handle($job))->toThrow(AttemptNotBumped::class, 'must bump attempt');
 
@@ -366,4 +373,36 @@ it('keeps running after a repeated attempt and handles the next job', function (
 
     expect($bridge->run(maxJobs: 2, forSeconds: 60))->toBe(2)
         ->and(implode("\n", $lines))->toContain('must bump attempt');
+});
+
+it('warns when the receipt wait cannot cover the exec timeout and kill grace', function () {
+    expect(CoordBridge::misconfiguration(600, 540))->toBeNull()
+        ->and(CoordBridge::misconfiguration(600, Cli::DEFAULT_EXEC_TIMEOUT))->toBeNull()
+        ->and(CoordBridge::misconfiguration(600, 900))->toContain('shorter than the exec timeout (900s)')
+        ->and(CoordBridge::misconfiguration(545, 540))->toContain('cap commands at 535s')
+        ->and(CoordBridge::misconfiguration(550, 540))->toBeNull()
+        ->and(CoordBridge::misconfiguration(600, 0))->toContain('(none)');
+});
+
+it('fails a claimed job for good when coord returns it without a valid attempt', function () {
+    $calls = [];
+    $claim = Mockery::mock(PDOStatement::class);
+    $claim->shouldReceive('execute')->andReturn(true);
+    $claim->shouldReceive('fetch')->andReturn(['id' => '00000000-0000-4000-8000-000000000001', 'capability' => 'c', 'payload' => '{}', 'request_id' => null, 'attempt' => null]);
+    $fail = Mockery::mock(PDOStatement::class);
+    $fail->shouldReceive('bindValue')->andReturnUsing(function (string $name, mixed $value) use (&$calls): bool {
+        $calls[$name] = $value;
+
+        return true;
+    });
+    $fail->shouldReceive('execute')->andReturn(true);
+    $fail->shouldReceive('fetchColumn')->andReturn('failed');
+    $pdo = Mockery::mock(PDO::class);
+    $pdo->shouldReceive('setAttribute');
+    $pdo->shouldReceive('prepare')->andReturnUsing(fn (string $sql) => str_contains($sql, 'fail_job') ? $fail : $claim);
+
+    expect(fn () => (new PdoCoordQueue($pdo))->claim([], 60))->toThrow(RuntimeException::class, 'no attempt');
+    expect($calls['job'])->toBe('00000000-0000-4000-8000-000000000001')
+        ->and($calls['retry'])->toBeFalse()
+        ->and($calls['error'])->toContain('agent-bus refused the claim');
 });

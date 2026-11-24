@@ -491,6 +491,33 @@ class Cli
                     continue;
                 }
 
+                $timeout = $execTimeout;
+
+                if ($exec !== '') {
+                    [$timeout, $note] = self::boundedExecTimeout($execTimeout, $envelope);
+
+                    if ($note !== null) {
+                        fwrite(STDERR, 'job '.($jobId ?? '-').' attempt '.$attempt.': '.$note."\n");
+                    }
+
+                    if ($timeout === null) {
+                        // The sender already gave up on this attempt; running it now only races the retry.
+                        $this->term($message, 'agent-bus receipt deadline passed');
+
+                        if ($jobId !== null) {
+                            $this->publishReceiptQuietly($jobId, $attempt, 'failed', $resolved, $agentType, ['reason' => 'deadline passed']);
+                        }
+
+                        $handled++;
+
+                        if ($max > 0 && $handled >= $max) {
+                            break;
+                        }
+
+                        continue;
+                    }
+                }
+
                 $this->deliveredReceipt($jobId, $attempt, $resolved, $agentType, $envelope);
 
                 echo json_encode($envelope, JSON_THROW_ON_ERROR)."\n";
@@ -516,11 +543,11 @@ class Cli
                         }
                     };
 
-                    [$code, $result, $timedOut] = $this->runWake($exec, $envelope, $resolved, $jobId, $attempt, $tick, $execTimeout, $passEnv);
+                    [$code, $result, $timedOut] = $this->runWake($exec, $envelope, $resolved, $jobId, $attempt, $tick, $timeout, $passEnv);
 
                     if ($timedOut) {
                         // Do not redeliver a hung attempt; the failed receipt lets coord retry.
-                        fwrite(STDERR, sprintf("--exec for job %s attempt %d timed out after %ss; killed it\n", $jobId ?? '-', $attempt, $execTimeout));
+                        fwrite(STDERR, sprintf("--exec for job %s attempt %d timed out after %ss; killed it\n", $jobId ?? '-', $attempt, $timeout));
                         $this->term($message, 'agent-bus exec timeout');
                     } else {
                         $this->ack($message);
@@ -531,7 +558,7 @@ class Cli
 
                         if ($timedOut) {
                             $detail['reason'] = 'timeout';
-                            $detail['timeoutSeconds'] = $execTimeout;
+                            $detail['timeoutSeconds'] = $timeout;
                         }
 
                         if ($result !== null) {
@@ -576,6 +603,49 @@ class Cli
         $this->putAliases($aliases, $resolved);
     }
 
+    public const DEFAULT_EXEC_TIMEOUT = 540.0;
+
+    /** Seconds between SIGTERM and SIGKILL for a timed-out wake command. */
+    public const EXEC_KILL_GRACE = 5.0;
+
+    /** Headroom kept between a killed command and the sender's receipt deadline. */
+    public const DEADLINE_MARGIN = 5.0;
+
+    /**
+     * The timeout to use for one message. A sender that waits for the receipt
+     * (coord-bridge) puts its deadline in the envelope as deadlineMs; the
+     * command must be dead, kill grace included, a margin before then, or the
+     * sender retries an attempt that is still running. Returns null when the
+     * deadline is already too close, plus a note when the limit was capped.
+     *
+     * @param  array<string, mixed>  $envelope
+     * @return array{0: float|null, 1: string|null}
+     */
+    public static function boundedExecTimeout(float $timeout, array $envelope, ?int $nowMs = null): array
+    {
+        $deadline = $envelope['deadlineMs'] ?? null;
+
+        if (! is_int($deadline)) {
+            return [$timeout, null];
+        }
+
+        $left = ($deadline - ($nowMs ?? Receipt::nowMs())) / 1000;
+        $allowed = floor($left - self::EXEC_KILL_GRACE - self::DEADLINE_MARGIN);
+
+        if ($allowed < 1) {
+            return [null, sprintf('the sender stops waiting in %.0fs, too soon to run --exec; terminating it', max(0, $left))];
+        }
+
+        if ($timeout <= 0 || $timeout > $allowed) {
+            return [$allowed, sprintf(
+                '--exec-timeout %s + %ss kill grace would outlive the sender\'s receipt wait (%.0fs left); capping at %ss',
+                $timeout <= 0 ? 'none' : $timeout.'s', self::EXEC_KILL_GRACE, $left, $allowed,
+            )];
+        }
+
+        return [$timeout, null];
+    }
+
     private function term(Msg $message, string $reason): void
     {
         try {
@@ -587,14 +657,16 @@ class Cli
 
     /**
      * Seconds a wake command may run (--exec-timeout, AGENT_BUS_EXEC_TIMEOUT,
-     * default 900). 0 disables the limit.
+     * default 540). 0 disables the limit. The default stays below
+     * coord-bridge's default 600 s receipt wait with room for the kill grace,
+     * so the bridge never retries an attempt that is still running.
      */
     public static function execTimeout(?string $option = null): float
     {
         $value = $option ?? getenv('AGENT_BUS_EXEC_TIMEOUT');
 
         if (! is_string($value) || trim($value) === '') {
-            return 900.0;
+            return self::DEFAULT_EXEC_TIMEOUT;
         }
 
         if (! is_numeric($value) || (float) $value < 0) {
@@ -651,7 +723,7 @@ class Cli
     {
         $tokens = explode('.', (string) $replyTo);
 
-        if (($tokens[0] ?? '') !== '$JS' || ($tokens[1] ?? '') !== 'ACK') {
+        if ($tokens[0] !== '$JS' || ($tokens[1] ?? '') !== 'ACK') {
             return 1;
         }
 
@@ -899,7 +971,7 @@ class Cli
 
                 if ($timeout > 0 && ! $timedOut && $now - $started >= $timeout) {
                     $timedOut = true;
-                    $killAt = $now + 5.0;
+                    $killAt = $now + self::EXEC_KILL_GRACE;
                     self::signalGroup($process, (int) $status['pid'], 15);
                 } elseif ($killAt !== null && $now >= $killAt) {
                     self::signalGroup($process, (int) $status['pid'], 9);

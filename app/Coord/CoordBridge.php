@@ -2,6 +2,7 @@
 
 namespace App\Coord;
 
+use App\Bus\Cli;
 use App\Bus\NatsBus;
 use App\Bus\Receipt;
 use Closure;
@@ -166,6 +167,8 @@ final class CoordBridge
             'jobId' => $jobId,
             'attempt' => $attempt,
             'sentAtMs' => Receipt::nowMs(),
+            // listen --exec caps its timeout so the command is dead before this.
+            'deadlineMs' => Receipt::nowMs() + (int) ($this->receiptWaitSeconds * 1000),
             'payload' => [
                 'jobId' => $jobId,
                 'attempt' => $attempt,
@@ -305,6 +308,29 @@ final class CoordBridge
         }
 
         return [];
+    }
+
+    /**
+     * Why a receipt wait cannot cover a wake command's timeout, or null. The
+     * listener caps its timeout to the envelope deadline anyway; this tells
+     * the operator the two settings disagree.
+     */
+    public static function misconfiguration(float $receiptWaitSeconds, float $execTimeoutSeconds): ?string
+    {
+        $needed = ($execTimeoutSeconds <= 0 ? INF : $execTimeoutSeconds) + Cli::EXEC_KILL_GRACE + Cli::DEADLINE_MARGIN;
+
+        if ($receiptWaitSeconds >= $needed) {
+            return null;
+        }
+
+        return sprintf(
+            '--wait %ss is shorter than the exec timeout (%s) + %ss kill grace + %ss margin; listen --exec will cap commands at %ss, or raise --wait',
+            $receiptWaitSeconds,
+            $execTimeoutSeconds <= 0 ? 'none' : $execTimeoutSeconds.'s',
+            Cli::EXEC_KILL_GRACE,
+            Cli::DEADLINE_MARGIN,
+            max(0, $receiptWaitSeconds - Cli::EXEC_KILL_GRACE - Cli::DEADLINE_MARGIN),
+        );
     }
 
     private static function describe(Throwable $exception): string

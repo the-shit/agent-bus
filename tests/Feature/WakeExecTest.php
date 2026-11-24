@@ -2,6 +2,7 @@
 
 use App\Bus\Cli;
 use App\Bus\NatsBus;
+use App\Bus\Receipt;
 use App\Coord\PdoCoordQueue;
 use Illuminate\Support\Facades\Process;
 use LaravelNats\Laravel\Facades\NatsV2;
@@ -357,3 +358,86 @@ it('maps a claim_job row with its attempt', function () {
     expect(PdoCoordQueue::claimedJob(['id' => 'f00', 'capability' => 'c', 'payload' => '{"a":1}', 'request_id' => null, 'attempt' => 2]))
         ->toMatchArray(['id' => 'f00', 'attempt' => 2, 'payload' => ['a' => 1]]);
 });
+
+it('caps --exec-timeout to the sender deadline in the envelope', function () {
+    $now = 1_000_000;
+
+    expect(Cli::boundedExecTimeout(540, []))->toBe([540.0, null])
+        ->and(Cli::boundedExecTimeout(540, ['deadlineMs' => $now + 600_000], $now))->toBe([540.0, null])
+        ->and(Cli::boundedExecTimeout(900, ['deadlineMs' => $now + 600_000], $now)[0])->toBe(590.0)
+        ->and(Cli::boundedExecTimeout(900, ['deadlineMs' => $now + 600_000], $now)[1])->toContain('capping at 590s')
+        ->and(Cli::boundedExecTimeout(0, ['deadlineMs' => $now + 600_000], $now)[0])->toBe(590.0)
+        ->and(Cli::boundedExecTimeout(540, ['deadlineMs' => $now + 8_000], $now)[0])->toBeNull()
+        ->and(Cli::execTimeout())->toBe(540.0)
+        ->and(Cli::DEFAULT_EXEC_TIMEOUT + Cli::EXEC_KILL_GRACE + Cli::DEADLINE_MARGIN)->toBeLessThanOrEqual(600.0);
+});
+
+/** Put one envelope straight into a throwaway session's inbox, as coord-bridge does. */
+function publishBridgeStyle(string $session, string $job, int $deadlineMs): void
+{
+    $bus = app(NatsBus::class);
+    $bus->ensureSessionInbox($session);
+    $bus->publishEnvelope('session.'.$session.'.inbox', [
+        'v' => 2, 'sessionId' => $session, 'agentType' => 'coord-bridge', 'model' => '', 'repo' => 'the-shit/agent-bus',
+        'type' => 'job', 'timestamp' => gmdate('Y-m-d\TH:i:s\Z'), 'jobId' => $job, 'attempt' => 1,
+        'sentAtMs' => Receipt::nowMs(), 'deadlineMs' => $deadlineMs, 'payload' => [],
+    ], Receipt::inboxMessageId($session, $job, 1));
+}
+
+it('kills a wake command before the sender deadline even with no --exec-timeout', function () {
+    app(NatsBus::class)->provision();
+    $session = 'm6-deadline-'.bin2hex(random_bytes(4));
+    $job = 'job-'.bin2hex(random_bytes(6));
+    $pidFile = tempnam(sys_get_temp_dir(), 'm6-deadline-');
+    agentBusCli(['heartbeat', '--session='.$session, '--agent-type=probe']);
+
+    try {
+        // 12 s left: 12 - 5 grace - 5 margin = 2 s for the command.
+        publishBridgeStyle($session, $job, Receipt::nowMs() + 12_000);
+        $started = microtime(true);
+        $listened = Process::path(base_path())->timeout(20)->run([
+            PHP_BINARY, base_path('bin/agent-bus'), 'listen', '--session='.$session, '--max=1', '--for=15',
+            '--exec-timeout=0', '--exec=cat >/dev/null; sleep 30 & echo $! > '.escapeshellarg($pidFile).'; wait',
+        ]);
+        $elapsed = microtime(true) - $started;
+        $receipt = lastJsonLine(agentBusCli(['receipt', '--job='.$job])->output());
+
+        expect($listened->exitCode())->toBe(0)
+            ->and($listened->errorOutput())->toContain('capping at')
+            ->and($elapsed)->toBeLessThan(9.0)
+            ->and($receipt['payload'] ?? [])->toMatchArray(['state' => 'failed', 'reason' => 'timeout', 'exitCode' => 124]);
+    } finally {
+        killWakeChild($pidFile);
+        @unlink($pidFile);
+        agentBusCli(['session-end', '--session='.$session]);
+    }
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+it('does not run a wake command whose sender deadline has already passed', function () {
+    app(NatsBus::class)->provision();
+    $session = 'm6-late-'.bin2hex(random_bytes(4));
+    $job = 'job-'.bin2hex(random_bytes(6));
+    $ran = tempnam(sys_get_temp_dir(), 'm6-late-');
+    unlink($ran);
+    agentBusCli(['heartbeat', '--session='.$session, '--agent-type=probe']);
+
+    try {
+        publishBridgeStyle($session, $job, Receipt::nowMs() - 1_000);
+        $listened = Process::path(base_path())->timeout(15)->run([
+            PHP_BINARY, base_path('bin/agent-bus'), 'listen', '--session='.$session, '--max=1', '--for=8',
+            '--exec=touch '.escapeshellarg($ran),
+        ]);
+        usleep(200_000);
+        $info = wakeConsumerInfo($session);
+        $receipt = lastJsonLine(agentBusCli(['receipt', '--job='.$job])->output());
+
+        expect($listened->exitCode())->toBe(0)
+            ->and(is_file($ran))->toBeFalse()
+            ->and($receipt['payload'] ?? [])->toMatchArray(['state' => 'failed', 'reason' => 'deadline passed'])
+            ->and($info['num_ack_pending'] ?? null)->toBe(0)
+            ->and($info['num_pending'] ?? null)->toBe(0);
+    } finally {
+        @unlink($ran);
+        agentBusCli(['session-end', '--session='.$session]);
+    }
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');

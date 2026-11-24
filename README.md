@@ -217,11 +217,26 @@ The command's environment is an **allowlist**: `PATH`, `HOME`, `USER`,
 `SSH_AUTH_SOCK` and `XDG_RUNTIME_DIR`. A command that calls `bin/agent-bus`
 itself needs `--pass-env NATS_URL` (and the NATS credentials it should have).
 
-`--exec-timeout=<seconds>` (or `AGENT_BUS_EXEC_TIMEOUT`, default 900, 0 = no
+`--exec-timeout=<seconds>` (or `AGENT_BUS_EXEC_TIMEOUT`, default 540, 0 = no
 limit) bounds the command. It runs in its own process group; past the limit
 the group gets SIGTERM, then SIGKILL 5 s later. The message is terminated (not
 redelivered) and receipted `failed` with `exitCode` 124 and `reason: timeout`,
 so `coord-bridge` fails the attempt and coord can retry it as the next attempt.
+A command that calls `setsid`, double-forks or otherwise daemonizes leaves the
+process group and **escapes the kill**; keep wake commands in the foreground.
+
+**Exec timeout vs. the bridge's receipt wait.** `coord-bridge --wait` (default
+600 s) is how long it waits for `done`/`failed` before failing the attempt and
+letting coord retry. A command must be dead before then, or the retry runs
+while the old attempt is still going. The rule is
+`exec timeout + 5 s kill grace + 5 s margin <= --wait`; the defaults (540 + 10
+<= 600) satisfy it. It is enforced, not just documented: the bridge puts its
+deadline in the inbox envelope (`deadlineMs`), and `listen --exec` caps the
+timeout to fit (logging `capping at Ns`), or, if the deadline is already too
+close, terminates the message and receipts `failed` with
+`reason: deadline passed` without running the command. `coord-bridge` also
+warns at start when `--wait` is too short for the local `AGENT_BUS_EXEC_TIMEOUT`.
+To run longer jobs, raise both: `--wait` first, then `--exec-timeout`.
 
 New inbox consumers are created with `max_deliver` = cap + 1 (so the listener
 sees the over-cap delivery and can receipt it), an ack wait of
@@ -243,7 +258,9 @@ sbprod `coord` is the source of truth for jobs, and the bus only carries job ids
    and delivered again.
 
 The bridge asserts that coord bumps `attempt` on every claim. A claim row with
-no attempt, or attempt < 1, is an error. A job that comes back with an attempt
+no attempt, or attempt < 1, is refused: the job is failed for good through
+`coord.fail_job(retry => false)` with the reason `agent-bus refused the claim`,
+so it cannot loop through claim, error and lease expiry. A job that comes back with an attempt
 this bridge already delivered (in memory, or any receipt for that attempt from
 the target session on the bus, which survives a bridge restart) is failed
 **without retry** and logged as `ERROR ... coord.claim_job must bump attempt`,
