@@ -14,7 +14,7 @@ NATS JetStream subject: `spotify.>`
     ↓
 agent-bus monitor consumer
     ↓
-BusEnvelopeBroadcast event
+(browser broadcast: not built; the BusEnvelopeBroadcast stub was removed)
 ```
 
 ## Setup
@@ -51,7 +51,7 @@ The `AgentBusMonitorCommand` currently writes to DB. For real-time web clients, 
 
 ```php
 // In AgentBusMonitorCommand::handle()
-broadcast(new BusEnvelopeBroadcast($envelope))->toOthers();
+// Not built yet. Add a broadcast event here when the web client exists.
 ```
 
 ## Event format
@@ -98,12 +98,12 @@ $bus->consumeMonitor(function (string $subject, array $envelope, ?int $seq): voi
 
 ```bash
 # Start NATS + agent-bus
-cd /home/jordan/Projects/the-shit/agent-bus
+cd ~/Projects/the-shit/agent-bus
 docker compose up -d
 bin/agent-bus provision
 
 # In music repo, watch and emit
-cd /home/jordan/Projects/the-shit/music
+cd ~/Projects/the-shit/music
 php spotify watch --json --interval=5 | tee /tmp/spotify-events.jsonl
 
 # In agent-bus, monitor

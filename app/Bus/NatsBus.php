@@ -16,6 +16,9 @@ use Throwable;
 
 class NatsBus
 {
+    /** JetStream API err_code for STREAM.MSG.GET with no message on the subject. */
+    public const JS_NO_MESSAGE_FOUND = 10037;
+
     public function __construct(private readonly NatsV2Gateway $nats) {}
 
     public function isReachable(): bool
@@ -153,7 +156,7 @@ class NatsBus
         try {
             $response = $this->stream()->getLastMessage('work.result.'.$requestId);
         } catch (\Exception $exception) {
-            if ($exception->getMessage() === 'no message found') {
+            if ($exception->getCode() === self::JS_NO_MESSAGE_FOUND) {
                 return false;
             }
 
@@ -317,6 +320,34 @@ class NatsBus
         }
 
         return array_values($ids);
+    }
+
+    /**
+     * The per-session durable inbox consumer that `bin/agent-bus inbox` pulls
+     * from. It uses DeliverPolicy New, which skips anything published before
+     * the consumer exists, so every sender must create it before publishing.
+     */
+    public function ensureSessionInbox(string $sessionId): void
+    {
+        $name = Cli::inboxConsumerName($sessionId);
+        $consumer = $this->stream()->getConsumer($name);
+
+        if ($consumer->exists()) {
+            return;
+        }
+
+        $consumer->getConfiguration()
+            ->setSubjectFilter('session.'.$sessionId.'.inbox')
+            ->setDeliverPolicy(DeliverPolicy::NEW)
+            ->setAckPolicy(AckPolicy::EXPLICIT);
+
+        try {
+            $consumer->create();
+        } catch (Throwable $exception) {
+            if (! $this->stream()->getConsumer($name)->exists()) {
+                throw $exception;
+            }
+        }
     }
 
     public function sidecarConsumerName(): string

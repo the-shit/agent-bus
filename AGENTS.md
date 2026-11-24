@@ -61,6 +61,10 @@ This is load-bearing and easy to get backwards.
 - **Addressed sends fail closed.** `send` exits 1 when the target session is
   not in KV. Delivering into the void is worse than refusing.
 
+## Delivery
+
+The inbox is at-most-once. `inbox` acks on pull, and `session-end` drops the consumer along with any unread mail. Senders must create the target's inbox consumer before publishing (`NatsBus::ensureSessionInbox`, `Cli::ensureInboxConsumer`). Never run `provision` against a live broker without telling its owner: it rewrites the stream to 7-day, 1 GiB, and 256 KiB-per-message limits.
+
 ## Tests
 
 ```bash

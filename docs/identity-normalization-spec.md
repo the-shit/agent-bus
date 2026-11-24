@@ -16,7 +16,7 @@ different ids depending on who reported it:
 |------------|--------------------------------------|---------|
 | Grok hooks | provider UUID                        | `01a09b75-b217-…` |
 | pi (jordan-bus ext) | `PI_SESSION_ID` env           | `01a09e6a-…` |
-| Herdr (pi panes) | jsonl file **path**            | `/home/jordan/.pi/agent/sessions/…jsonl` |
+| Herdr (pi panes) | jsonl file **path**            | `~/.pi/agent/sessions/…jsonl` |
 | Herdr (hive panes) | _none_ — no `agent_session`    | anonymous |
 | Fallback (`Capture::sessionId`) | `{kind}-{sha1(cwd)[:8]}-{pid}` | changes every restart |
 

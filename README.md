@@ -143,6 +143,17 @@ bin/agent-bus session-end --session 01a08ef9-2515-7460-89bd-5efc21f28642
 # crash net is KV TTL 90s; this is the polite leave
 ```
 
+### Delivery guarantee: at most once
+
+The addressed inbox delivers **at most once**:
+
+- `inbox` acknowledges a message when it is pulled, before the agent acts on it. If the agent crashes after the pull, the message is gone.
+- `session-end` deletes the session's inbox consumer, and unread mail goes with it.
+- Every sender (CLI `send` and MCP `send`) creates the target's inbox consumer before publishing. The consumer uses DeliverPolicy New, so a message published before the consumer exists would never be delivered.
+- `provision` rewrites an existing stream's limits: 7-day max age, 1 GiB max bytes, 256 KiB per message, and a 900 s duplicate window. Anything older than 7 days ages out.
+
+Work that must not be lost belongs in a job ledger (sbprod `coord`), not in the inbox.
+
 ## Board Grok Build and OpenCode
 
 This repo ships the adapters. They only map the README allowlist onto `bin/agent-bus`.

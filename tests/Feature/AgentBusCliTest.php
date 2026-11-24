@@ -2,7 +2,6 @@
 
 use App\Bus\Cli;
 use App\Bus\NatsBus;
-use Illuminate\Contracts\Process\ProcessResult;
 use Illuminate\Support\Facades\Process;
 use LaravelNats\Laravel\Facades\NatsV2;
 
@@ -666,44 +665,3 @@ describe('hot path', function () {
             ->toContain('emit', 'send', 'inbox', 'heartbeat', 'session-end', 'sessions', 'work-request', 'work-result', 'hook', 'opencode');
     });
 });
-
-/**
- * @param  list<string>  $arguments
- * @param  array<string, string>  $environment
- */
-function agentBusCli(array $arguments, array $environment = []): ProcessResult
-{
-    return Process::path(base_path())
-        ->timeout(5)
-        ->env($environment)
-        ->run([
-            PHP_BINARY,
-            base_path('bin/agent-bus'),
-            ...$arguments,
-        ]);
-}
-
-/**
- * @param  list<string>  $arguments
- * @param  array<string, string>  $environment
- */
-function agentBusCliWithStdin(array $arguments, string $stdin, array $environment = []): ProcessResult
-{
-    return Process::path(base_path())
-        ->timeout(5)
-        ->env($environment)
-        ->input($stdin)
-        ->run([
-            PHP_BINARY,
-            base_path('bin/agent-bus'),
-            ...$arguments,
-        ]);
-}
-
-function stderrLines(ProcessResult $result): array
-{
-    return array_values(array_filter(
-        explode("\n", trim($result->errorOutput())),
-        fn (string $line): bool => $line !== '',
-    ));
-}

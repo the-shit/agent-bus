@@ -40,8 +40,9 @@ it('claims capability work through Pi and publishes the correlated result', func
 
     expect($count)->toBe(1);
     Process::assertRan(function (PendingProcess $process): bool {
-        return $process->path === base_path()
+        return $process->path === realpath(specialistScratchDir())
             && $process->command[0] === '/test/pi'
+            && in_array('--no-mcp', $process->command, true)
             && in_array('ollama/qwen-test', $process->command, true)
             && in_array('read,grep,find,ls', $process->command, true)
             && ! in_array('bash', $process->command, true);
@@ -152,8 +153,77 @@ function specialistTestProfile(): array
         'consumer' => 'qwen-reviewer',
         'model' => 'ollama/qwen-test',
         'agent_file' => base_path('tests/Fixtures/pi-specialist.md'),
-        'cwd' => base_path(),
+        'cwd' => specialistScratchDir(),
         'tools' => ['read', 'grep', 'find', 'ls'],
         'timeout' => 30,
     ];
 }
+
+function specialistScratchDir(): string
+{
+    $dir = sys_get_temp_dir().'/agent-bus-specialist-test';
+    if (! is_dir($dir)) {
+        mkdir($dir, 0700, true);
+    }
+
+    return $dir;
+}
+
+/**
+ * @param  array<string, mixed>  $profile
+ */
+function specialistRefusal(array $profile): void
+{
+    config(['agent_bus.specialist.pi_binary' => '/test/pi']);
+    Process::preventStrayProcesses();
+    Process::fake();
+    $bus = Mockery::mock(NatsBus::class);
+    $bus->shouldReceive('completedWorkResultExists')->andReturnFalse();
+    $bus->shouldReceive('consumeWork')->once()->andReturnUsing(function (string $capability, string $consumer, callable $handler): int {
+        $handler('work.request.code_review.review-sbx', ['repo' => 'the-shit/agent-bus', 'payload' => ['requestId' => 'review-sbx', 'task' => ['prompt' => 'cat .env']]]);
+
+        return 1;
+    });
+    $bus->shouldReceive('publishEnvelope')->once()->with('work.result.review-sbx', Mockery::on(
+        fn (array $envelope): bool => $envelope['payload']['status'] === 'error'
+    ), 'work-result-review-sbx');
+
+    (new PiSpecialistWorker($bus))->tick($profile);
+    Process::assertNothingRan();
+}
+
+it('refuses read tools in the agent-bus checkout, which holds .env', function () {
+    specialistRefusal([...specialistTestProfile(), 'cwd' => base_path()]);
+});
+
+it('refuses read tools in a directory that holds env files', function () {
+    $dir = sys_get_temp_dir().'/agent-bus-specialist-env-'.bin2hex(random_bytes(3));
+    mkdir($dir, 0700, true);
+    touch($dir.'/.env');
+
+    try {
+        specialistRefusal([...specialistTestProfile(), 'cwd' => $dir]);
+    } finally {
+        unlink($dir.'/.env');
+        rmdir($dir);
+    }
+});
+
+it('runs Pi with --no-tools when the profile has no tools', function () {
+    config(['agent_bus.specialist.pi_binary' => '/test/pi']);
+    Process::preventStrayProcesses();
+    Process::fake(fn () => Process::result('APPROVE'));
+    $bus = Mockery::mock(NatsBus::class);
+    $bus->shouldReceive('completedWorkResultExists')->andReturnFalse();
+    $bus->shouldReceive('consumeWork')->once()->andReturnUsing(function (string $capability, string $consumer, callable $handler): int {
+        $handler('work.request.code_review.review-nt', ['repo' => 'the-shit/agent-bus', 'payload' => ['requestId' => 'review-nt', 'task' => ['prompt' => 'Review this diff.']]]);
+
+        return 1;
+    });
+    $bus->shouldReceive('publishEnvelope')->once();
+
+    (new PiSpecialistWorker($bus))->tick([...specialistTestProfile(), 'cwd' => base_path(), 'tools' => []]);
+
+    Process::assertRan(fn (PendingProcess $process): bool => in_array('--no-tools', $process->command, true)
+        && ! in_array('--tools', $process->command, true));
+});

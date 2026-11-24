@@ -240,6 +240,8 @@ class Server
             'payload' => $payload,
         ];
 
+        // The inbox consumer delivers only messages published after it exists.
+        $this->bus->ensureSessionInbox($resolved);
         $this->bus->publishEnvelope('session.'.$resolved.'.inbox', $envelope);
 
         return $this->textResult($this->encode($envelope));

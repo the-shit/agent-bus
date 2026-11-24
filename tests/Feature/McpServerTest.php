@@ -1,5 +1,6 @@
 <?php
 
+use App\Bus\Cli;
 use App\Bus\NatsBus;
 use App\Mcp\Server;
 use Illuminate\Support\Str;
@@ -177,4 +178,25 @@ it('sends an inbox envelope to a live session and publishes it', function () {
         ->toBe(['tool' => 'prove', 'text' => 'ping']);
 
     expect($bus->lastEnvelope('session.'.$sessionId.'.inbox'))->toBe($envelope);
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+it('delivers the first message a session ever receives when it arrives over MCP', function () {
+    $bus = app(NatsBus::class);
+    $bus->provision();
+    $sessionId = 'mcp-first-'.bin2hex(random_bytes(4));
+    $bus->putSession($sessionId, json_encode(['sessionId' => $sessionId, 'repo' => 'the-shit/agent-bus'], JSON_THROW_ON_ERROR));
+
+    try {
+        // No CLI send and no inbox pull first: MCP must create the consumer itself.
+        expect($bus->stream()->getConsumer(Cli::inboxConsumerName($sessionId))->exists())->toBeFalse();
+
+        $response = mcpSingle('{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"send","arguments":{"sessionId":"'.$sessionId.'","payload":{"text":"first over mcp"}}}}');
+        $pulled = agentBusCli(['inbox', '--session='.$sessionId], ['AGENT_BUS_INBOX_EXPIRES' => '0.5']);
+
+        expect($response['result']['isError'])->toBeFalse()
+            ->and($pulled->exitCode())->toBe(0)
+            ->and(json_decode($pulled->output(), true)['payload'])->toBe(['text' => 'first over mcp']);
+    } finally {
+        agentBusCli(['session-end', '--session='.$sessionId]);
+    }
 })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
