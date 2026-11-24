@@ -2,20 +2,34 @@
 
 namespace App\Models;
 
-// Simplified model for future use. Currently not needed for dashboard.
-// When database persistence is needed, install illuminate/database
+use Illuminate\Database\Eloquent\Model;
 
-class BusEvent
+class BusEvent extends Model
 {
-    public static function updateOrCreate(array $attributes, array $values = []): self
-    {
-        // Todo: persist to database when illuminate/database is available
-        return new self;
-    }
+    public $timestamps = false;
 
-    public static function create(array $attributes): self
-    {
-        // Todo: persist to database when illuminate/database is available
-        return new self;
-    }
+    protected $table = 'bus_events';
+
+    protected $fillable = [
+        'event_id',
+        'correlation_id',
+        'causation_id',
+        'seq',
+        'subject',
+        'session_id',
+        'agent_type',
+        'model',
+        'repo',
+        'type',
+        'payload',
+        'occurred_at',
+        'received_at',
+    ];
+
+    protected $casts = [
+        'payload' => 'array',
+        'seq' => 'integer',
+        'occurred_at' => 'datetime',
+        'received_at' => 'datetime',
+    ];
 }

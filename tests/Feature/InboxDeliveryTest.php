@@ -102,6 +102,34 @@ it('refuses to acknowledge messages without delivery metadata', function () {
         ->toThrow(RuntimeException::class, 'Missing JetStream delivery metadata');
 });
 
+it('consumeInbox acknowledges through InboxDelivery so the message is not redelivered', function () {
+    $consumer = 'delivery-ack-'.bin2hex(random_bytes(4));
+    $subject = 'session.ack-'.$consumer.'.inbox';
+    config([
+        'agent_bus.sidecar.consumer' => $consumer,
+        'agent_bus.sidecar.expires' => 0.05,
+    ]);
+    $bus = app(NatsBus::class);
+    try {
+        $bus->provision();
+        $bus->ensureInboxConsumer();
+        $bus->publishEnvelope($subject, ['payload' => ['text' => 'once']]);
+
+        $received = [];
+        $processed = $bus->consumeInbox(function ($inboxSubject, $body) use (&$received): void {
+            $received[] = json_decode($body, true)['payload']['text'];
+        });
+
+        expect($processed)->toBe(1)
+            ->and($received)->toBe(['once']);
+
+        $bus->consumeInbox(fn () => throw new LogicException('Acknowledged message was delivered again'));
+    } finally {
+        NatsV2::jetstream()->stream($bus->streamName())->getConsumer($consumer)->delete();
+        NatsV2::disconnectAll();
+    }
+})->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
 it('redelivers an unavailable recipient after a consumer reconnect and records exhausted messages', function () {
     $consumer = 'delivery-test-'.bin2hex(random_bytes(4));
     config([

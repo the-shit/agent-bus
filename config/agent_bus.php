@@ -29,10 +29,6 @@ return [
         'bucket' => env('AGENT_BUS_ALIAS_BUCKET', 'session_aliases'),
     ],
 
-    'herdr' => [
-        'binary' => env('AGENT_BUS_HERDR', 'herdr'),
-    ],
-
     'sidecar' => [
         'consumer' => env('AGENT_BUS_SIDECAR_CONSUMER'),
         'max_attempts' => (int) env('AGENT_BUS_SIDECAR_MAX_ATTEMPTS', 5),
@@ -72,6 +68,18 @@ return [
                 'timeout' => (int) env('AGENT_BUS_QWEN_REVIEW_TIMEOUT', 600),
             ],
         ],
+    ],
+
+    'monitor' => [
+        'consumer' => env('AGENT_BUS_MONITOR_CONSUMER'),
+        'batch' => (int) env('AGENT_BUS_MONITOR_BATCH', 8),
+        'expires' => (float) env('AGENT_BUS_MONITOR_EXPIRES', 0.5),
+    ],
+
+    'history_store' => [
+        'enabled' => env('BUS_HISTORY_DB_HOST') !== null && env('BUS_HISTORY_DB_HOST') !== '',
+        'connection' => env('BUS_HISTORY_CONNECTION', 'bus_history'),
+        'schema' => env('BUS_HISTORY_DB_SCHEMA', 'agent-bus'),
     ],
 
 ];

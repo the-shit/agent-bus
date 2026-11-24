@@ -2,6 +2,11 @@
 
 _Status: proposed · 2026-09-13 · author: pi (with Jordan)_
 
+> **Update 2026-10-17:** Herdr was removed from the bus. The `herdr` kind, the
+> pane-grade `herdr:{pane_id}` fallback, and pane-id aliases no longer exist in
+> `BusIdentity`; `identity_quality` is always `session`. The Herdr rows below are
+> kept as the historical motivation for this spec.
+
 ## Problem
 
 One agent, many names. The same live session can appear on the bus under

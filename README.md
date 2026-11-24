@@ -55,9 +55,7 @@ Stay local: `phase_changed`, permission chatter, MCP connect, token stream, the 
 Hooks already get `sessionId`, `cwd`, `toolName` on stdin. `agent-bus emit`
 publishes. The framework does not boot on every tool call.
 
-- **Send:** MCP/CLI `send` publishes to `session.{id}.inbox`. The target agent
-  process pulls its own durable inbox and injects it into its harness. Herdr is
-  only an optional legacy adapter for agents that cannot consume their inbox.
+- **Send:** MCP/CLI `send` publishes to `session.{id}.inbox`. The receiving process pulls and owns delivery; no terminal multiplexer or pane injection is involved. Prove: two agents, one send, the other receives the JSON. No paste.
 - **First clients:** Pi, Grok Build, and OpenCode.
 
 ## First four
@@ -65,8 +63,7 @@ publishes. The framework does not boot on every tool call.
 1. **Stand JetStream + KV** — this compose file, stream `AGENT_BUS`, KV `sessions`. Done when `nats stream info` and `nats kv get sessions <id>` work from two terminals.
 2. **Hook capture allowlist** — global Grok hooks → `agent-bus emit`. Done when a PostToolUse for Composer shows one `toolCall` on the stream and `phase_changed` does not.
 3. **Presence MCP** — `list_sessions` / `get_session` read KV. Done when this pane's session appears after SessionStart and vanishes after SessionEnd.
-4. **Addressed inbox** — MCP `send` + target-owned inbox pull. Done when a
-   second agent receives a JSON ping with no Herdr process and no paste.
+4. **Addressed inbox** — MCP `send` + recipient-side pull. Done when a second agent receives a JSON ping with no paste.
 
 ## Not this
 
@@ -107,13 +104,13 @@ nats kv get sessions demo
 ## Emit and send
 
 `bin/agent-bus` is one binary with two paths. Hook verbs run on Composer's
-autoloader alone; `provision` and `sidecar` boot Laravel Zero. Measured on this
+autoloader alone; `provision`, `monitor`, and `mcp` boot Laravel Zero. Measured on this
 checkout, PHP 8.4:
 
 | Path | Verbs | Cost |
 |---|---|---|
-| Hot | `emit` `send` `inbox` `heartbeat` `session-end` `sessions` `work-request` `work-result` `hook` `opencode` | 66 ms baseline |
-| Cold | `provision` `sidecar` `judge` `specialist` `app:build` | 150 ms baseline |
+| Hot | `emit` `send` `inbox` `heartbeat` `session-end` `sessions` `work-request` `work-result` `hook` `opencode` | 66 ms |
+| Cold | `provision` `monitor` `mcp` `judge` `specialist` `app:build` | 150 ms |
 
 A test runs every hot verb in a subprocess and fails if a single framework class
 gets loaded.
@@ -158,29 +155,6 @@ A PostToolUse / `tool.execute.after` for `run_terminal_command` publishes **one*
 To board every Grok session on the machine, copy `hooks/grok.json` to `~/.grok/hooks/` and replace `/ABS/PATH/TO/agent-bus` with this checkout. Do not install that from CI.
 
 Heartbeat PUTs presence JSON (`sessionId`, `agentType`, `repo`, `lastSeen`). `sessions` lists the id. Stop heartbeats: the KV key is gone within 90s. `sessionEnd` deletes immediately.
-
-## Host sidecar
-
-The sidecar is optional compatibility code, not part of the bus topology. Use it
-only for a harness that cannot pull `session.{id}.inbox` itself. It maps Grok
-session ids from `herdr agent list` onto panes and injects inbox JSON with
-`herdr agent prompt`.
-
-```bash
-bin/agent-bus provision
-bin/agent-bus sidecar
-```
-
-Agents with a native adapter should run `inbox` themselves and should not run
-the sidecar, because two consumers would produce duplicate delivery paths.
-
-From another process (session A):
-
-```bash
-bin/agent-bus send --session <B> --payload '{"text":"ping"}'
-```
-
-Session B's own adapter starts the next turn with that JSON. Herdr can be absent.
 
 ## Specialized work and Jev
 
@@ -228,12 +202,6 @@ and only `read`, `grep`, `find`, and `ls`. Requests are passed as argument-array
 values rather than through a shell. Process failures return bounded generic
 errors so prompts and process arguments do not leak into result subjects.
 
-Pest proves the map and that the sidecar would prompt that pane (Herdr is faked; NATS tests skip when the broker is down). Live two-Grok prove is the issue, not CI.
-
-```bash
-vendor/bin/pest tests/Feature/AgentBusSidecarTest.php tests/Unit/Bus/SessionPaneMapTest.php
-```
-
 [Pint and Pest](https://github.com/the-shit/agent-bus/actions/workflows/tests.yml) run on every pull request.
 
 ## MCP server
@@ -265,7 +233,7 @@ php bin/agent-bus app:build agent-bus
 ```
 
 One ~30 MB file, no checkout and no `composer install` on the target machine.
-Good for the sidecar and for running verbs by hand.
+Good for long-running cold commands and for running verbs by hand.
 
 **Not for hooks.** PHAR stub overhead puts the hot path at ~206 ms against
 66 ms for the script — roughly 140 ms added to every tool call. Point
@@ -273,12 +241,13 @@ Good for the sidecar and for running verbs by hand.
 
 ### Inbox delivery failures
 
-The sidecar acknowledges an inbox message only after successful Herdr injection,
-or after JetStream stores a terminal failure receipt. Missing recipients,
-invalid envelopes, and injection errors retry with exponential delay (5 seconds
-initially, capped at 60 seconds). `AGENT_BUS_SIDECAR_MAX_ATTEMPTS` defaults to 5;
-`AGENT_BUS_SIDECAR_RETRY_SECONDS` controls the initial delay. Attempt counts live
-in JetStream and survive sidecar restarts.
+`NatsBus::consumeInbox` acknowledges an inbox message only after its handler
+returns, or after JetStream stores a terminal failure receipt. A handler that
+throws is retried with exponential delay (5 seconds initially, capped at 60
+seconds). `AGENT_BUS_SIDECAR_MAX_ATTEMPTS` defaults to 5;
+`AGENT_BUS_SIDECAR_RETRY_SECONDS` controls the initial delay (the env names are
+kept from the removed Herdr sidecar so existing durable consumers and settings
+keep working). Attempt counts live in JetStream and survive consumer restarts.
 
 Exhausted deliveries appear on `repo.agent-bus.delivery.failed`, with the original
 body, subject, stream-sequence message ID, consumer, attempt count, and exception
@@ -287,8 +256,8 @@ Receipts have the stream's retention policy; no automatic replay or Mattermost
 notification is added. Consumers of these receipts must treat the original body
 as untrusted message content.
 
-Inbox pulls are now one message at a time (the former sidecar batch setting is
+Inbox pulls are now one message at a time (the former batch setting is
 removed), with a 60-second acknowledgement timeout, including existing durable
-consumers. Heartbeat renewal and duplicate injection after a crash between
-prompting and acknowledgement remain separate work. This is at-least-once
+consumers. Heartbeat renewal and duplicate delivery after a crash between
+handling and acknowledgement remain separate work. This is at-least-once
 transport delivery, not proof that an agent completed its task.

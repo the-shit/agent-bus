@@ -6,7 +6,6 @@ use Basis\Nats\Consumer\AckPolicy;
 use Basis\Nats\Consumer\Consumer;
 use Basis\Nats\Consumer\DeliverPolicy;
 use Basis\Nats\KeyValue\Bucket;
-use Basis\Nats\Message\Msg;
 use Basis\Nats\Message\Payload;
 use Basis\Nats\Stream\Stream;
 use InvalidArgumentException;
@@ -66,6 +65,11 @@ class NatsBus
         return (string) config('agent_bus.kv.bucket', 'sessions');
     }
 
+    public function aliasesBucket(): string
+    {
+        return (string) config('agent_bus.aliases.bucket', 'session_aliases');
+    }
+
     public function provision(): void
     {
         $stream = $this->stream();
@@ -99,6 +103,14 @@ class NatsBus
         // default to a two-minute window, which is invalid for our 90s TTL.
         $stream->getConfiguration()->setDuplicateWindow(min(2.0, max(0.001, $ttlSeconds)));
         $stream->update();
+
+        // Alternate id -> canonical id map. No TTL: aliases are durable
+        // pointers, unlike the 90s presence records.
+        $aliases = $this->nats->jetstream()->api()->getBucket($this->aliasesBucket());
+        $aliasStream = $aliases->getStream();
+        $aliases->getConfiguration()->setHistory(1);
+        $aliases->getConfiguration()->configureStream($aliasStream->getConfiguration());
+        $aliasStream->update();
     }
 
     public function sessionTtlNanos(): int
@@ -200,6 +212,98 @@ class NatsBus
     }
 
     /**
+     * Canonical id whose presence is on the bus, resolving the given id
+     * through the alias map first. Null when nothing is registered.
+     */
+    public function resolveSessionId(string $id): ?string
+    {
+        if ($this->getSession($id) !== null) {
+            return $id;
+        }
+
+        $canonical = $this->getAlias($id);
+
+        if ($canonical !== null && $this->getSession($canonical) !== null) {
+            return $canonical;
+        }
+
+        return null;
+    }
+
+    public function putAlias(string $alternate, string $canonical): void
+    {
+        $this->aliasBucket()->put(self::aliasKey($alternate), json_encode([
+            'alternate' => $alternate,
+            'canonical' => $canonical,
+            'createdAt' => gmdate('Y-m-d\TH:i:s\Z'),
+        ], JSON_THROW_ON_ERROR));
+    }
+
+    public function getAlias(string $alternate): ?string
+    {
+        if ($alternate === '') {
+            return null;
+        }
+
+        try {
+            $value = $this->aliasBucket()->get(self::aliasKey($alternate));
+        } catch (Throwable) {
+            return null;
+        }
+
+        if (! is_string($value) || $value === '') {
+            return null;
+        }
+
+        $decoded = json_decode($value, true);
+        $canonical = is_array($decoded) ? ($decoded['canonical'] ?? null) : null;
+
+        return is_string($canonical) && $canonical !== '' ? $canonical : null;
+    }
+
+    /**
+     * Alternate ids hold dots/slashes the KV backing stream's single-token
+     * subject cannot store (issue #30, bug a) — hash the key.
+     */
+    public static function aliasKey(string $alternate): string
+    {
+        return hash('sha256', $alternate);
+    }
+
+    /**
+     * One KV getAll. Presence records as stored, with sessionId filled from the
+     * key when the JSON omitted it.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function listPresence(): array
+    {
+        $sessions = [];
+
+        foreach ($this->bucket()->getAll() as $entry) {
+            if ($entry->key === '' || ! is_string($entry->value) || $entry->value === '') {
+                continue;
+            }
+
+            $decoded = json_decode($entry->value, true);
+
+            if (! is_array($decoded)) {
+                $sessions[] = ['sessionId' => $entry->key];
+
+                continue;
+            }
+
+            if (! isset($decoded['sessionId']) || ! is_string($decoded['sessionId']) || $decoded['sessionId'] === '') {
+                $decoded['sessionId'] = $entry->key;
+            }
+
+            $sessions[] = $decoded;
+        }
+
+        return $sessions;
+    }
+
+    /**
      * @return list<string>
      */
     public function listSessionIds(): array
@@ -213,80 +317,6 @@ class NatsBus
         }
 
         return array_values($ids);
-    }
-
-    /**
-     * Presence records from one KV scan. A non-object value becomes a record
-     * that carries only the key, and a missing sessionId is filled from that key.
-     *
-     * @return list<array<string, mixed>>
-     */
-    public function listPresence(): array
-    {
-        $records = [];
-
-        foreach ($this->bucket()->getAll() as $entry) {
-            if ($entry->key === '' || ! is_string($entry->value) || $entry->value === '') {
-                continue;
-            }
-
-            $decoded = json_decode($entry->value, true);
-            $record = is_array($decoded) ? $decoded : ['sessionId' => $entry->key];
-
-            if (! is_string($record['sessionId'] ?? null) || $record['sessionId'] === '') {
-                $record['sessionId'] = $entry->key;
-            }
-
-            $records[] = $record;
-        }
-
-        return $records;
-    }
-
-    /**
-     * Session id that is present, or the canonical id stored for an alias.
-     * Empty input and an unknown id both return null.
-     */
-    public function resolveSessionId(string $sessionId): ?string
-    {
-        if ($sessionId === '') {
-            return null;
-        }
-
-        if ($this->getSession($sessionId) !== null) {
-            return $sessionId;
-        }
-
-        return $this->getAlias($sessionId);
-    }
-
-    /**
-     * Canonical session id for an alternate (bare UUID, jsonl path, pane id).
-     * Null when the alias bucket is missing or the alternate is unknown.
-     */
-    public function getAlias(string $alternate): ?string
-    {
-        if ($alternate === '') {
-            return null;
-        }
-
-        $bucketName = config('agent_bus.aliases.bucket', 'session_aliases');
-        $bucketName = is_string($bucketName) && $bucketName !== '' ? $bucketName : 'session_aliases';
-
-        try {
-            $value = $this->nats->jetstream()->api()->getBucket($bucketName)->get(hash('sha256', $alternate));
-        } catch (Throwable) {
-            return null;
-        }
-
-        if (! is_string($value) || $value === '') {
-            return null;
-        }
-
-        $decoded = json_decode($value, true);
-        $canonical = is_array($decoded) ? ($decoded['canonical'] ?? null) : null;
-
-        return is_string($canonical) && $canonical !== '' ? $canonical : null;
     }
 
     public function sidecarConsumerName(): string
@@ -308,15 +338,17 @@ class NatsBus
             $consumer->getConfiguration()
                 ->setSubjectFilter('session.*.inbox')
                 ->setDeliverPolicy(DeliverPolicy::NEW)
-                ->setAckPolicy(AckPolicy::EXPLICIT);
+                ->setAckPolicy(AckPolicy::EXPLICIT)
+                ->setAckWait(60_000_000_000);
             $consumer->create();
+        } elseif ($consumer->getConfiguration()->getAckWait() !== 60_000_000_000) {
+            $consumer->getConfiguration()->setAckWait(60_000_000_000);
+            $consumer->create(false);
         }
     }
 
     /**
-     * Pull one inbox batch. A handler that returns is acknowledged. A handler
-     * that throws is retried by InboxDelivery, then recorded and acknowledged
-     * once the attempt limit is exhausted.
+     * Pull one inbox batch. Failures are retried or recorded before acknowledgement.
      *
      * @param  callable(string, string): void  $handler
      */
@@ -324,25 +356,30 @@ class NatsBus
     {
         $this->ensureInboxConsumer();
 
-        $batch = (int) config('agent_bus.sidecar.batch', 8);
         $expires = (float) config('agent_bus.sidecar.expires', 0.5);
 
         $consumer = $this->stream()->getConsumer($this->sidecarConsumerName());
-        $consumer->setIterations(max(1, $iterations));
-        $consumer->setBatching(max(1, $batch));
+        $consumer->setBatching(1);
         $consumer->setExpires($expires > 0 ? $expires : 0.5);
 
-        return $consumer->handle(function (Payload $payload, ?string $replyTo) use ($handler): void {
-            $message = new Msg([
-                'subject' => is_string($payload->subject) ? $payload->subject : '',
-                'sid' => '0',
-                'replyTo' => $replyTo,
-                'length' => strlen($payload->body),
-                'payload' => $payload,
-            ]);
-            $message->setClient($this->nats->connection());
-            (new InboxDelivery($this))->handle($message, $handler);
-        }, ack: false);
+        $processed = 0;
+        $delivery = new InboxDelivery($this);
+        for ($iteration = 0; $iteration < max(1, $iterations); $iteration++) {
+            // Fetch one at a time: a slow prompt must not age other messages' leases.
+            $queue = $consumer->getQueue();
+            try {
+                foreach ($queue->fetchAll(1) as $message) {
+                    if (! $message->payload->isEmpty()) {
+                        $delivery->handle($message, $handler);
+                        $processed++;
+                    }
+                }
+            } finally {
+                $consumer->client->unsubscribe($queue);
+            }
+        }
+
+        return $processed;
     }
 
     public function monitorConsumerName(): string
@@ -363,7 +400,7 @@ class NatsBus
         if (! $consumer->exists()) {
             $consumer->getConfiguration()
                 ->setSubjectFilters($this->subjects())
-                ->setDeliverPolicy(DeliverPolicy::ALL)
+                ->setDeliverPolicy(DeliverPolicy::NEW)
                 ->setAckPolicy(AckPolicy::EXPLICIT);
             $consumer->create();
         }
@@ -551,5 +588,10 @@ class NatsBus
     private function bucket(): Bucket
     {
         return $this->nats->jetstream()->api()->getBucket($this->kvBucket());
+    }
+
+    private function aliasBucket(): Bucket
+    {
+        return $this->nats->jetstream()->api()->getBucket($this->aliasesBucket());
     }
 }
