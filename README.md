@@ -334,7 +334,9 @@ NATS_URL=nats://odin:4222 bin/agent-bus work-request \
 
 The worker invokes Pi with `ollama/qwen3-coder-next:48k` and the reviewer
 persona. **Behaviour change:** by default it now runs with `--no-tools
---no-mcp` in the system temp dir (`AGENT_BUS_QWEN_REVIEW_CWD`), so the reviewer
+--no-mcp` in the system temp dir (`AGENT_BUS_QWEN_REVIEW_CWD`; if `TMPDIR` lies
+inside this checkout, as on some CI runners, `/tmp` is used instead, and the
+same goes for `listen --exec` stdin and result files), so the reviewer
 sees only the prompt. Set `AGENT_BUS_QWEN_REVIEW_TOOLS=read,grep,find,ls` to
 give it read tools; it then refuses a cwd in this checkout, in `$HOME`, or in any
 directory holding env, key or credential files. `--no-mcp` and `--no-tools`

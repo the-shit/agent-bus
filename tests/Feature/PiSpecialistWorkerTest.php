@@ -2,6 +2,7 @@
 
 use App\Bus\NatsBus;
 use App\Bus\PiSpecialistWorker;
+use App\Bus\ScratchDir;
 use Illuminate\Process\PendingProcess;
 use Illuminate\Support\Facades\Process;
 
@@ -161,7 +162,8 @@ function specialistTestProfile(): array
 
 function specialistScratchDir(): string
 {
-    $dir = sys_get_temp_dir().'/agent-bus-specialist-test';
+    // Outside the checkout even when TMPDIR points inside it (CI runners).
+    $dir = ScratchDir::path().'/agent-bus-specialist-test';
     if (! is_dir($dir)) {
         mkdir($dir, 0700, true);
     }
@@ -197,7 +199,7 @@ it('refuses read tools in the agent-bus checkout, which holds .env', function ()
 });
 
 it('refuses read tools in a directory that holds env files', function () {
-    $dir = sys_get_temp_dir().'/agent-bus-specialist-env-'.bin2hex(random_bytes(3));
+    $dir = ScratchDir::path().'/agent-bus-specialist-env-'.bin2hex(random_bytes(3));
     mkdir($dir, 0700, true);
     touch($dir.'/.env');
 

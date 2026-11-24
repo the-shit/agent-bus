@@ -147,7 +147,7 @@ class PiSpecialistWorker
 
         $base = realpath(base_path());
 
-        if ($base !== false && ($cwd === $base || str_starts_with($cwd.'/', $base.'/'))) {
+        if ($base !== false && ScratchDir::inside($cwd, $base)) {
             throw new RuntimeException('Specialist tools are refused in the agent-bus checkout; set AGENT_BUS_QWEN_REVIEW_CWD to a scratch checkout.');
         }
 

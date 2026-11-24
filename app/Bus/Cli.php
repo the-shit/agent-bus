@@ -841,8 +841,9 @@ class Cli
      */
     private function runWake(string $command, array $envelope, string $sessionId, ?string $jobId, int $attempt, ?Closure $tick = null, float $timeout = 0.0, array $passEnv = []): array
     {
-        $input = tempnam(sys_get_temp_dir(), 'agent-bus-wake-in-');
-        $resultFile = tempnam(sys_get_temp_dir(), 'agent-bus-wake-result-');
+        $scratch = ScratchDir::path();
+        $input = tempnam($scratch, 'agent-bus-wake-in-');
+        $resultFile = tempnam($scratch, 'agent-bus-wake-result-');
         $stdin = false;
 
         try {
