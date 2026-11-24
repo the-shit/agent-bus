@@ -70,6 +70,16 @@ return [
         ],
     ],
 
+    // sbprod coord (house/toolkit sbprod/coord) via Supavisor session mode.
+    // The password comes from a 0600 file, never from the environment.
+    'coord' => [
+        'host' => env('COORD_DB_HOST', '127.0.0.1'),
+        'port' => (int) env('COORD_DB_PORT', 15442),
+        'database' => env('COORD_DB_NAME', 'postgres'),
+        'user' => env('COORD_DB_USER', ''),
+        'password_file' => env('COORD_DB_PASSWORD_FILE', ''),
+    ],
+
     'monitor' => [
         'consumer' => env('AGENT_BUS_MONITOR_CONSUMER'),
         'batch' => (int) env('AGENT_BUS_MONITOR_BATCH', 8),

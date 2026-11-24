@@ -3,6 +3,8 @@
 namespace App\Mcp;
 
 use App\Bus\NatsBus;
+use App\Bus\Receipt;
+use InvalidArgumentException;
 use JsonException;
 use Throwable;
 
@@ -36,6 +38,7 @@ class Server
                 'properties' => [
                     'sessionId' => ['type' => 'string'],
                     'payload' => ['type' => 'object'],
+                    'jobId' => ['type' => 'string', 'description' => 'Optional coord job id; receipts land on work.receipt.{jobId}.{state}'],
                 ],
                 'required' => ['sessionId', 'payload'],
             ],
@@ -195,6 +198,12 @@ class Server
             return $this->errorResult(-32602, 'sessionId is required');
         }
 
+        try {
+            $jobId = Receipt::jobId(is_string($arguments['jobId'] ?? null) ? $arguments['jobId'] : '');
+        } catch (InvalidArgumentException $exception) {
+            return $this->errorResult(-32602, 'jobId must be 1-128 characters of A-Z, a-z, 0-9, _ or -');
+        }
+
         $resolved = $this->bus->resolveSessionId($sessionId);
         $presence = $resolved !== null ? $this->decodePresence($this->bus->getSession($resolved)) : null;
 
@@ -222,6 +231,12 @@ class Server
             return $this->errorResult(-32602, 'payload must be a JSON object');
         }
 
+        try {
+            $jobId = Receipt::jobId(is_string($arguments['jobId'] ?? null) ? $arguments['jobId'] : '');
+        } catch (InvalidArgumentException $exception) {
+            return $this->errorResult(-32602, 'jobId must be 1-128 characters of A-Z, a-z, 0-9, _ or -');
+        }
+
         $resolved = $this->bus->resolveSessionId($sessionId);
         $presence = $resolved !== null ? $this->decodePresence($this->bus->getSession($resolved)) : null;
 
@@ -238,9 +253,15 @@ class Server
             'type' => 'inbox',
             'timestamp' => gmdate('Y-m-d\TH:i:s\Z'),
             'payload' => $payload,
+            'jobId' => $jobId,
+            'sentAtMs' => Receipt::nowMs(),
         ];
 
-        $this->bus->publishEnvelope('session.'.$resolved.'.inbox', $envelope);
+        $this->bus->publishEnvelope('session.'.$resolved.'.inbox', $envelope, Receipt::inboxMessageId($resolved, $jobId));
+        $this->bus->publishEnvelope(
+            Receipt::subject($jobId, 'queued'),
+            Receipt::envelope($jobId, 'queued', $resolved, $envelope['agentType'], [], $envelope['repo']),
+        );
 
         return $this->textResult($this->encode($envelope));
     }

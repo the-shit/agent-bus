@@ -156,6 +156,55 @@ To board every Grok session on the machine, copy `hooks/grok.json` to `~/.grok/h
 
 Heartbeat PUTs presence JSON (`sessionId`, `agentType`, `repo`, `lastSeen`). `sessions` lists the id. Stop heartbeats: the KV key is gone within 90s. `sessionEnd` deletes immediately.
 
+## Wake-on-arrival and receipts by job id (M6)
+
+Every `send` carries a `jobId`. Pass a coord job id with `--job=<uuid>`, or one is
+generated. Resending the same job to the same session is de-duplicated by
+JetStream (`Nats-Msg-Id`, inside the stream duplicate window).
+
+Receipts are published on `work.receipt.{jobId}.{state}`, one subject per state:
+
+| state | written by | means |
+|---|---|---|
+| `queued` | sender (`send`, MCP `send`, `coord-bridge`) | the broker accepted the publish |
+| `delivered` | target (`inbox` or `listen`) | the target process pulled it |
+| `done` / `failed` | target (`listen --exec` exit code, or `receipt --state`) | the target finished |
+
+A reader takes the furthest state, so a late `queued` never hides `delivered`.
+
+```bash
+# target: block on its own inbox and fire on arrival (keeps presence fresh)
+bin/agent-bus listen --session=pi:abc --agent-type=pi --exec='my-agent-turn'
+
+# sender: wait up to 5 s for the target to take it
+bin/agent-bus send --session=pi:abc --job=<coord-job-uuid> --payload='{"text":"ping"}' --wait-receipt=5
+bin/agent-bus receipt --job=<coord-job-uuid> --until=done --wait=600
+```
+
+`listen --exec` runs the command with the envelope on stdin and with
+`AGENT_BUS_JOB_ID` and `AGENT_BUS_SESSION_ID` set. Exit 0 records `done`, and
+any other exit records `failed`.
+
+### coord bridge
+
+sbprod `coord` is the source of truth for jobs, and the bus only carries job ids.
+`bin/agent-bus coord-bridge --session=<id> --capabilities=a,b` does four things:
+
+1. It runs `LISTEN coord` through Supavisor session mode.
+2. It claims a job with `coord.claim_job`.
+3. It puts the job in that session's inbox, keyed by the coord job id.
+4. It maps the receipts back to coord: `delivered` calls `heartbeat_job`, `done`
+   calls `complete_job`, and `failed` or a timeout calls `fail_job` with a retry.
+
+It never claims work for a session that is not on the bus. Configure it with
+`COORD_DB_HOST`, `COORD_DB_PORT` (15442), `COORD_DB_USER` (`<role>.sbprod`), and
+`COORD_DB_PASSWORD_FILE` (a 0600 file).
+
+Tests: `tests/Feature/WakeOnArrivalTest.php` covers AT-6 and the house/board#105
+fixture end-to-end test. `tests/Feature/Coord/CoordBridgeTest.php` runs against a
+faked coord. `tests/Feature/Coord/CoordLiveTest.php` is opt-in and needs a
+throwaway coord Postgres, never live sbprod.
+
 ## Specialized work and Jev
 
 Workers advertise comma-separated capabilities in heartbeat presence. A caller
