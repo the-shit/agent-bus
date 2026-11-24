@@ -12,15 +12,15 @@ This directory contains tools to integrate `the-shit/music` playback events into
 
 ```bash
 # 1. Start agent-bus NATS
-cd /home/jordan/Projects/the-shit/agent-bus
+cd ~/Projects/the-shit/agent-bus
 composer install  # if not done yet
 
 # 2. Configure music CLI to emit events
-cd /home/jordan/Projects/the-shit/music
+cd ~/Projects/the-shit/music
 php spotify watch --json > ~/.config/spotify-cli/events.jsonl 2>&1 &
 
 # 3. Start the bridge
-cd /home/jordan/Projects/the-shit/agent-bus
+cd ~/Projects/the-shit/agent-bus
 php spotify-event-bridge.php
 
 # 4. In another terminal, monitor events

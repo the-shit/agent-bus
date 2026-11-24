@@ -9,10 +9,11 @@ namespace App\Coord;
 interface CoordQueue
 {
     /**
-     * Claim the next queued job this role may run, or null.
+     * Claim the next queued job this role may run, or null. attempt is
+     * coord's jobs.attempt after the claim (1 on the first claim).
      *
      * @param  list<string>  $capabilities
-     * @return array{id: string, capability: string, payload: array<string, mixed>, request_id: ?string}|null
+     * @return array{id: string, capability: string, payload: array<string, mixed>, request_id: ?string, attempt?: int}|null
      */
     public function claim(array $capabilities, int $leaseSeconds): ?array;
 

@@ -143,6 +143,20 @@ bin/agent-bus session-end --session 01a08ef9-2515-7460-89bd-5efc21f28642
 # crash net is KV TTL 90s; this is the polite leave
 ```
 
+### Delivery guarantee: at most once (inbox) / at least once (listen --exec)
+
+The addressed inbox delivers **at most once**:
+
+- `inbox` acknowledges a message when it is pulled, before the agent acts on it. If the agent crashes after the pull, the message is gone.
+- `listen --exec` is the exception: it acknowledges only after the command exits and keeps the ack deadline fresh while it runs, so a listener that dies mid-command gets the message redelivered (at least once). A message delivered more than `AGENT_BUS_INBOX_MAX_DELIVERIES` times (default 3) is terminated without running the command, logged, and receipted `failed`.
+- **Wake commands must be idempotent per job id and attempt.** Besides redelivery, if `coord-bridge` sees a real `done` but `complete_job` then throws (coord down), the bridge fails the attempt with a retry and coord runs the job again as the next attempt.
+- An inbox consumer nobody pulls from for 7 days (`AGENT_BUS_INBOX_INACTIVE_SECONDS`, 0 = never) is removed by NATS, with its unread mail.
+- `session-end` deletes the session's inbox consumer, and unread mail goes with it.
+- Every sender (CLI `send` and MCP `send`) creates the target's inbox consumer before publishing. The consumer uses DeliverPolicy New, so a message published before the consumer exists would never be delivered.
+- `provision` rewrites an existing stream's limits: 7-day max age, 1 GiB max bytes, 256 KiB per message, and a 900 s duplicate window. Anything older than 7 days ages out.
+
+Work that must not be lost belongs in a job ledger (sbprod `coord`), not in the inbox.
+
 ## Board Grok Build and OpenCode
 
 This repo ships the adapters. They only map the README allowlist onto `bin/agent-bus`.
@@ -158,11 +172,15 @@ Heartbeat PUTs presence JSON (`sessionId`, `agentType`, `repo`, `lastSeen`). `se
 
 ## Wake-on-arrival and receipts by job id (M6)
 
-Every `send` carries a `jobId`. Pass a coord job id with `--job=<uuid>`, or one is
-generated. Resending the same job to the same session is de-duplicated by
-JetStream (`Nats-Msg-Id`, inside the stream duplicate window).
+Every `send` carries a `jobId` and an `attempt`. Pass a coord job id with
+`--job=<uuid>` (or one is generated) and coord's `jobs.attempt` with
+`--attempt=<n>` (default 1). Resending the same attempt of a job to the same
+session is de-duplicated by JetStream (`Nats-Msg-Id`
+`inbox:{session}:{jobId}:{attempt}`, inside the stream duplicate window); the
+next attempt of a requeued job gets through and is handled again.
 
-Receipts are published on `work.receipt.{jobId}.{state}`, one subject per state:
+Receipts are published on `work.receipt.{jobId}.{attempt}.{state}`, one subject
+per attempt and state, so attempt 2 never sees attempt 1's `failed`:
 
 | state | written by | means |
 |---|---|---|
@@ -170,7 +188,8 @@ Receipts are published on `work.receipt.{jobId}.{state}`, one subject per state:
 | `delivered` | target (`inbox` or `listen`) | the target process pulled it |
 | `done` / `failed` | target (`listen --exec` exit code, or `receipt --state`) | the target finished |
 
-A reader takes the furthest state, so a late `queued` never hides `delivered`.
+A reader takes the furthest state of one attempt (`receipt --attempt=<n>`,
+default 1), so a late `queued` never hides `delivered`.
 
 ```bash
 # target: block on its own inbox and fire on arrival (keeps presence fresh)
@@ -181,9 +200,48 @@ bin/agent-bus send --session=pi:abc --job=<coord-job-uuid> --payload='{"text":"p
 bin/agent-bus receipt --job=<coord-job-uuid> --until=done --wait=600
 ```
 
-`listen --exec` runs the command with the envelope on stdin and with
-`AGENT_BUS_JOB_ID` and `AGENT_BUS_SESSION_ID` set. Exit 0 records `done`, and
-any other exit records `failed`.
+`listen --exec` runs the command with the envelope on stdin (from a 0600 temp
+file, so a command that never reads stdin cannot stall the listener) and with
+`AGENT_BUS_JOB_ID`, `AGENT_BUS_ATTEMPT`, `AGENT_BUS_SESSION_ID` and
+`AGENT_BUS_RESULT_FILE` set. Exit 0 records `done`, and any other exit records
+`failed`. A JSON object written to `AGENT_BUS_RESULT_FILE` becomes the `done`
+receipt's `result` (and the coord job's result). While the command runs, the
+listener extends the message's ack deadline and, with `--agent-type`, refreshes
+presence every 30 s.
+
+The command's environment is an **allowlist**: `PATH`, `HOME`, `USER`,
+`LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `TERM`, the four
+`AGENT_BUS_*` job variables above, and any name given with `--pass-env NAME`
+(repeatable, or comma-separated). Everything else stays out, including
+`NATS_URL` and NATS credentials, `TYPESAFE_API_KEY`, database and Redis URLs,
+`SSH_AUTH_SOCK` and `XDG_RUNTIME_DIR`. A command that calls `bin/agent-bus`
+itself needs `--pass-env NATS_URL` (and the NATS credentials it should have).
+
+`--exec-timeout=<seconds>` (or `AGENT_BUS_EXEC_TIMEOUT`, default 540, 0 = no
+limit) bounds the command. It runs in its own process group; past the limit
+the group gets SIGTERM, then SIGKILL 5 s later. The message is terminated (not
+redelivered) and receipted `failed` with `exitCode` 124 and `reason: timeout`,
+so `coord-bridge` fails the attempt and coord can retry it as the next attempt.
+A command that calls `setsid`, double-forks or otherwise daemonizes leaves the
+process group and **escapes the kill**; keep wake commands in the foreground.
+
+**Exec timeout vs. the bridge's receipt wait.** `coord-bridge --wait` (default
+600 s) is how long it waits for `done`/`failed` before failing the attempt and
+letting coord retry. A command must be dead before then, or the retry runs
+while the old attempt is still going. The rule is
+`exec timeout + 5 s kill grace + 5 s margin <= --wait`; the defaults (540 + 10
+<= 600) satisfy it. It is enforced, not just documented: the bridge puts its
+deadline in the inbox envelope (`deadlineMs`), and `listen --exec` caps the
+timeout to fit (logging `capping at Ns`), or, if the deadline is already too
+close, terminates the message and receipts `failed` with
+`reason: deadline passed` without running the command. `coord-bridge` also
+warns at start when `--wait` is too short for the local `AGENT_BUS_EXEC_TIMEOUT`.
+To run longer jobs, raise both: `--wait` first, then `--exec-timeout`.
+
+New inbox consumers are created with `max_deliver` = cap + 1 (so the listener
+sees the over-cap delivery and can receipt it), an ack wait of
+`AGENT_BUS_INBOX_ACK_WAIT_SECONDS` (default 30), and the 7-day inactive
+threshold. Existing consumers keep their old settings until they are recreated.
 
 ### coord bridge
 
@@ -192,18 +250,63 @@ sbprod `coord` is the source of truth for jobs, and the bus only carries job ids
 
 1. It runs `LISTEN coord` through Supavisor session mode.
 2. It claims a job with `coord.claim_job`.
-3. It puts the job in that session's inbox, keyed by the coord job id.
-4. It maps the receipts back to coord: `delivered` calls `heartbeat_job`, `done`
-   calls `complete_job`, and `failed` or a timeout calls `fail_job` with a retry.
+3. It puts the job in that session's inbox, keyed by the coord job id and
+   coord's `attempt` (claim_job bumps it on every claim).
+4. It maps that attempt's receipts back to coord: `delivered` calls
+   `heartbeat_job`, `done` calls `complete_job`, and `failed` or a timeout calls
+   `fail_job` with a retry. A requeued job is claimed again as the next attempt
+   and delivered again.
 
-It never claims work for a session that is not on the bus. Configure it with
-`COORD_DB_HOST`, `COORD_DB_PORT` (15442), `COORD_DB_USER` (`<role>.sbprod`), and
-`COORD_DB_PASSWORD_FILE` (a 0600 file).
+The bridge asserts that coord bumps `attempt` on every claim. A claim row with
+no attempt, or attempt < 1, is refused: the job is failed for good through
+`coord.fail_job(retry => false)` with the reason `agent-bus refused the claim`,
+so it cannot loop through claim, error and lease expiry. A job that comes back with an attempt
+this bridge already delivered (in memory, or any receipt for that attempt from
+the target session on the bus, which survives a bridge restart) is failed
+**without retry** and logged as `ERROR ... coord.claim_job must bump attempt`,
+instead of being silently de-duplicated by JetStream.
+
+It never claims work for a session that is not on the bus. On any error after a
+claim (bus or coord down) it calls `fail_job` with a retry, so a job is never
+left leased, then backs off (1 s doubling to 30 s) and keeps running; if even
+`fail_job` fails, `reclaim_expired_jobs` requeues the job when its lease runs
+out. A dropped coord connection is reopened (and `LISTEN` re-issued) on the next
+call.
+
+Who may finish a job: only a `done`/`failed` receipt whose `sessionId` is the
+session the bridge delivered to, for the attempt it delivered, moves the coord
+job; receipts from any other session are ignored. **This is advisory.** The bus
+has no per-sender authentication, so anyone with broker credentials can publish
+a receipt naming the target session (or publish a later spoof that masks the
+real `done`, so the attempt times out). Real enforcement needs all three of:
+
+1. per-agent NATS users;
+2. the session in the receipt subject
+   (`work.receipt.{jobId}.{attempt}.{session}.{state}`), with the bridge reading
+   only its delivered session's subject;
+3. NATS permissions that let each agent user publish only on its own session's
+   receipts (`work.receipt.*.*.<its-session>.>`) and subscribe only to its own
+   `session.<its-session>.inbox`.
+
+That is not built yet.
+
+**Upgrade together.** Receipt subjects moved from `work.receipt.{jobId}.{state}`
+to `work.receipt.{jobId}.{attempt}.{state}`, and the inbox msg-id from
+`inbox:{session}:{jobId}` to `inbox:{session}:{jobId}:{attempt}`. Mixed versions
+miss each other's receipts. Upgrade the Thor CLI (`bin/agent-bus`), every running
+`coord-bridge`, and the house `agent_bus_send` tool at the same time.
+
+Configure it with `COORD_DB_HOST`, `COORD_DB_PORT` (15442), `COORD_DB_USER`
+(`<role>.sbprod`), and `COORD_DB_PASSWORD_FILE`. The bridge refuses a password
+file that group or other can read (it must be 0600 or 0400).
 
 Tests: `tests/Feature/WakeOnArrivalTest.php` covers AT-6 and the house/board#105
 fixture end-to-end test. `tests/Feature/Coord/CoordBridgeTest.php` runs against a
-faked coord. `tests/Feature/Coord/CoordLiveTest.php` is opt-in and needs a
-throwaway coord Postgres, never live sbprod.
+faked coord. `tests/Feature/WakeExecTest.php` covers ack-after-exec, redelivery after a
+crash, the scrubbed environment and result file, and the password-file check.
+`tests/Feature/Coord/CoordLiveTest.php` is opt-in and needs a
+throwaway coord Postgres, never live sbprod; it covers AT-6 through coord and a
+job that fails on attempt 1 and completes on attempt 2.
 
 ## Specialized work and Jev
 
@@ -246,8 +349,15 @@ NATS_URL=nats://odin:4222 bin/agent-bus work-request \
   --wait=600
 ```
 
-The worker invokes Pi with `ollama/qwen3-coder-next:48k`, the reviewer persona,
-and only `read`, `grep`, `find`, and `ls`. Requests are passed as argument-array
+The worker invokes Pi with `ollama/qwen3-coder-next:48k` and the reviewer
+persona. **Behaviour change:** by default it now runs with `--no-tools
+--no-mcp` in the system temp dir (`AGENT_BUS_QWEN_REVIEW_CWD`; if `TMPDIR` lies
+inside this checkout, as on some CI runners, `/tmp` is used instead, and the
+same goes for `listen --exec` stdin and result files), so the reviewer
+sees only the prompt. Set `AGENT_BUS_QWEN_REVIEW_TOOLS=read,grep,find,ls` to
+give it read tools; it then refuses a cwd in this checkout, in `$HOME`, or in any
+directory holding env, key or credential files. `--no-mcp` and `--no-tools`
+need a Pi that has them: Pi 1.6.0 on Thor does (`pi --help` lists both). Requests are passed as argument-array
 values rather than through a shell. Process failures return bounded generic
 errors so prompts and process arguments do not leak into result subjects.
 

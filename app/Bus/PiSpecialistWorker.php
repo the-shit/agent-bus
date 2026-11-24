@@ -85,6 +85,8 @@ class PiSpecialistWorker
             throw new RuntimeException('Specialist working directory does not exist.');
         }
 
+        $this->assertSandboxed($cwd, $profile['tools']);
+
         $agentPrompt = file_get_contents($profile['agent_file']);
 
         if (! is_string($agentPrompt) || trim($agentPrompt) === '') {
@@ -105,8 +107,8 @@ class PiSpecialistWorker
                     $profile['model'],
                     '--system-prompt',
                     $this->systemPrompt($agentPrompt),
-                    '--tools',
-                    implode(',', $profile['tools']),
+                    '--no-mcp',
+                    ...($profile['tools'] === [] ? ['--no-tools'] : ['--tools', implode(',', $profile['tools'])]),
                     '--print',
                     $this->taskPrompt($prompt),
                 ]);
@@ -127,6 +129,39 @@ class PiSpecialistWorker
         }
 
         return mb_substr($output, 0, 50_000);
+    }
+
+    /**
+     * Read tools plus an untrusted prompt can exfiltrate whatever the tools can
+     * reach. Refuse to run them from this checkout (it holds .env) or from any
+     * directory that holds env or key files. Pi's read tool also accepts
+     * absolute paths, so enable tools only inside a real sandbox as well.
+     *
+     * @param  list<string>  $tools
+     */
+    private function assertSandboxed(string $cwd, array $tools): void
+    {
+        if ($tools === []) {
+            return;
+        }
+
+        $base = realpath(base_path());
+
+        if ($base !== false && ScratchDir::inside($cwd, $base)) {
+            throw new RuntimeException('Specialist tools are refused in the agent-bus checkout; set AGENT_BUS_QWEN_REVIEW_CWD to a scratch checkout.');
+        }
+
+        $home = getenv('HOME');
+
+        if (is_string($home) && $home !== '' && realpath($home) === $cwd) {
+            throw new RuntimeException('Specialist tools are refused in the home directory.');
+        }
+
+        foreach (['.env', '.env.*', '*.env', '*.pem', '*.key', 'id_*', '.aws', '.ssh', '.config'] as $pattern) {
+            if (glob($cwd.'/'.$pattern, GLOB_NOSORT) !== []) {
+                throw new RuntimeException('Specialist tools are refused: the working directory holds env, key, or config files.');
+            }
+        }
     }
 
     private function piBinary(): string

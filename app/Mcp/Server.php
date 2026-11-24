@@ -38,7 +38,8 @@ class Server
                 'properties' => [
                     'sessionId' => ['type' => 'string'],
                     'payload' => ['type' => 'object'],
-                    'jobId' => ['type' => 'string', 'description' => 'Optional coord job id; receipts land on work.receipt.{jobId}.{state}'],
+                    'jobId' => ['type' => 'string', 'description' => 'Optional coord job id; receipts land on work.receipt.{jobId}.{attempt}.{state}'],
+                    'attempt' => ['type' => 'integer', 'minimum' => 1, 'description' => 'Delivery attempt for jobId (coord jobs.attempt); defaults to 1'],
                 ],
                 'required' => ['sessionId', 'payload'],
             ],
@@ -198,12 +199,6 @@ class Server
             return $this->errorResult(-32602, 'sessionId is required');
         }
 
-        try {
-            $jobId = Receipt::jobId(is_string($arguments['jobId'] ?? null) ? $arguments['jobId'] : '');
-        } catch (InvalidArgumentException $exception) {
-            return $this->errorResult(-32602, 'jobId must be 1-128 characters of A-Z, a-z, 0-9, _ or -');
-        }
-
         $resolved = $this->bus->resolveSessionId($sessionId);
         $presence = $resolved !== null ? $this->decodePresence($this->bus->getSession($resolved)) : null;
 
@@ -237,6 +232,12 @@ class Server
             return $this->errorResult(-32602, 'jobId must be 1-128 characters of A-Z, a-z, 0-9, _ or -');
         }
 
+        try {
+            $attempt = Receipt::attempt(is_int($arguments['attempt'] ?? null) || is_string($arguments['attempt'] ?? null) ? $arguments['attempt'] : null);
+        } catch (InvalidArgumentException) {
+            return $this->errorResult(-32602, 'attempt must be a whole number from 1 to '.Receipt::MAX_ATTEMPT);
+        }
+
         $resolved = $this->bus->resolveSessionId($sessionId);
         $presence = $resolved !== null ? $this->decodePresence($this->bus->getSession($resolved)) : null;
 
@@ -254,13 +255,16 @@ class Server
             'timestamp' => gmdate('Y-m-d\TH:i:s\Z'),
             'payload' => $payload,
             'jobId' => $jobId,
+            'attempt' => $attempt,
             'sentAtMs' => Receipt::nowMs(),
         ];
 
-        $this->bus->publishEnvelope('session.'.$resolved.'.inbox', $envelope, Receipt::inboxMessageId($resolved, $jobId));
+        // The inbox consumer delivers only messages published after it exists.
+        $this->bus->ensureSessionInbox($resolved);
+        $this->bus->publishEnvelope('session.'.$resolved.'.inbox', $envelope, Receipt::inboxMessageId($resolved, $jobId, $attempt));
         $this->bus->publishEnvelope(
-            Receipt::subject($jobId, 'queued'),
-            Receipt::envelope($jobId, 'queued', $resolved, $envelope['agentType'], [], $envelope['repo']),
+            Receipt::subject($jobId, $attempt, 'queued'),
+            Receipt::envelope($jobId, $attempt, 'queued', $resolved, $envelope['agentType'], [], $envelope['repo']),
         );
 
         return $this->textResult($this->encode($envelope));

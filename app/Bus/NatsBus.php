@@ -16,6 +16,9 @@ use Throwable;
 
 class NatsBus
 {
+    /** JetStream API err_code for STREAM.MSG.GET with no message on the subject. */
+    public const JS_NO_MESSAGE_FOUND = 10037;
+
     public function __construct(private readonly NatsV2Gateway $nats) {}
 
     public function isReachable(): bool
@@ -153,7 +156,7 @@ class NatsBus
         try {
             $response = $this->stream()->getLastMessage('work.result.'.$requestId);
         } catch (\Exception $exception) {
-            if ($exception->getMessage() === 'no message found') {
+            if ($exception->getCode() === self::JS_NO_MESSAGE_FOUND) {
                 return false;
             }
 
@@ -320,14 +323,14 @@ class NatsBus
     }
 
     /**
-     * The per-session durable inbox consumer that `bin/agent-bus inbox` and
-     * `listen` pull from. DeliverPolicy New skips anything published before
-     * the consumer exists, so a sender must create it first.
+     * The per-session durable inbox consumer that `bin/agent-bus inbox` pulls
+     * from. It uses DeliverPolicy New, which skips anything published before
+     * the consumer exists, so every sender must create it before publishing.
      */
     public function ensureSessionInbox(string $sessionId): void
     {
-        $safe = preg_replace('/[^A-Za-z0-9_-]/', '-', $sessionId) ?? 'session';
-        $consumer = $this->stream()->getConsumer('agent-bus-inbox-'.$safe);
+        $name = Cli::inboxConsumerName($sessionId);
+        $consumer = $this->stream()->getConsumer($name);
 
         if ($consumer->exists()) {
             return;
@@ -338,10 +341,12 @@ class NatsBus
             ->setDeliverPolicy(DeliverPolicy::NEW)
             ->setAckPolicy(AckPolicy::EXPLICIT);
 
+        Cli::configureInboxConsumer($consumer->getConfiguration());
+
         try {
             $consumer->create();
         } catch (Throwable $exception) {
-            if (! $this->stream()->getConsumer('agent-bus-inbox-'.$safe)->exists()) {
+            if (! $this->stream()->getConsumer($name)->exists()) {
                 throw $exception;
             }
         }

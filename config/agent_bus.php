@@ -1,5 +1,7 @@
 <?php
 
+use App\Bus\ScratchDir;
+
 return [
 
     'stream' => env('AGENT_BUS_STREAM', 'AGENT_BUS'),
@@ -56,15 +58,20 @@ return [
     ],
 
     'specialist' => [
-        'pi_binary' => env('AGENT_BUS_PI_BINARY', '/home/jordan/.local/share/mise/shims/pi'),
+        // Resolved from PATH unless set; real values live in ~/.config/agent-bus/agent-bus.env.
+        'pi_binary' => env('AGENT_BUS_PI_BINARY', 'pi'),
         'profiles' => [
             'qwen-reviewer' => [
                 'capability' => 'code_review',
                 'consumer' => 'agent-bus-qwen-reviewer',
                 'model' => env('AGENT_BUS_QWEN_REVIEW_MODEL', 'ollama/qwen3-coder-next:48k'),
-                'agent_file' => env('AGENT_BUS_QWEN_REVIEW_AGENT', '/home/jordan/.pi/agent/agents/reviewer.md'),
-                'cwd' => env('AGENT_BUS_QWEN_REVIEW_CWD', base_path()),
-                'tools' => ['read', 'grep', 'find', 'ls'],
+                'agent_file' => env('AGENT_BUS_QWEN_REVIEW_AGENT', ($_SERVER['HOME'] ?? getenv('HOME') ?: '~').'/.pi/agent/agents/reviewer.md'),
+                // Bus prompts are untrusted. With no tools the reviewer only sees
+                // the prompt. Read tools need an explicit scratch checkout with no
+                // secrets in it (see PiSpecialistWorker::assertSandboxed).
+                // Resolved only when the env var is unset, not on every boot.
+                'cwd' => env('AGENT_BUS_QWEN_REVIEW_CWD') ?: ScratchDir::path(),
+                'tools' => array_values(array_filter(explode(',', (string) env('AGENT_BUS_QWEN_REVIEW_TOOLS', '')))),
                 'timeout' => (int) env('AGENT_BUS_QWEN_REVIEW_TIMEOUT', 600),
             ],
         ],

@@ -7,13 +7,19 @@ use LaravelZero\Framework\Commands\Command;
 
 class DeleteConsumerCommand extends Command
 {
-    protected $signature = 'delete-consumer';
+    protected $signature = 'delete-consumer {--force : Required. Deletes the monitor consumer and its delivery position}';
 
     protected $description = 'Delete the monitor consumer to force recreation';
 
     public function handle(NatsBus $bus): int
     {
         $consumerName = $bus->monitorConsumerName();
+
+        if (! $this->option('force')) {
+            $this->error("Refusing to delete consumer {$consumerName} without --force.");
+
+            return self::FAILURE;
+        }
         $stream = $bus->stream();
         $consumer = $stream->getConsumer($consumerName);
 
