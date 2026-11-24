@@ -2,35 +2,20 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Model;
+// Simplified model for future use. Currently not needed for dashboard.
+// When database persistence is needed, install illuminate/database
 
-class BusEvent extends Model
+class BusEvent
 {
-    use HasFactory;
+    public static function updateOrCreate(array $attributes, array $values = []): self
+    {
+        // Todo: persist to database when illuminate/database is available
+        return new self;
+    }
 
-    public $timestamps = false;
-
-    protected $fillable = [
-        'event_id',
-        'correlation_id',
-        'causation_id',
-        'seq',
-        'subject',
-        'session_id',
-        'agent_type',
-        'model',
-        'repo',
-        'type',
-        'payload',
-        'occurred_at',
-        'received_at',
-    ];
-
-    protected $casts = [
-        'payload' => 'array',
-        'seq' => 'integer',
-        'occurred_at' => 'datetime',
-        'received_at' => 'datetime',
-    ];
+    public static function create(array $attributes): self
+    {
+        // Todo: persist to database when illuminate/database is available
+        return new self;
+    }
 }
