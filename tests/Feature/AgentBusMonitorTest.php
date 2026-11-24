@@ -90,3 +90,9 @@ it('consumes a monitor batch using configured batch and expires', function () {
         NatsV2::disconnectAll();
     }
 })->skip(fn () => brokerIsDown(), 'NATS broker is not running');
+
+it('refuses to delete the monitor consumer without --force', function () {
+    $this->artisan('delete-consumer')
+        ->expectsOutputToContain('without --force')
+        ->assertFailed();
+});

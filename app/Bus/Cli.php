@@ -897,6 +897,9 @@ class Cli
                     $envelope = json_decode($payload, true);
 
                     if (! is_array($envelope)) {
+                        // Malformed result: wait like any other miss instead of spinning.
+                        usleep(100_000);
+
                         continue;
                     }
 
@@ -1164,7 +1167,7 @@ class Cli
 
     private function bucketExists(string $bucket): bool
     {
-        return $this->client()->getApi()->getStream('KV_'.$bucket)->exists();
+        return $this->client()->getApi()->getBucket($bucket)->getStream()->exists();
     }
 
     /**

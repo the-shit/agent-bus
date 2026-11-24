@@ -5,11 +5,11 @@ services:
     command: ["-c", "/etc/nats/nats-server.conf"]
     restart: unless-stopped
     ports:
-      - "${AGENT_BUS_NATS_BIND:-10.0.3.198}:4222:4222"
+      - "${AGENT_BUS_NATS_BIND:-127.0.0.1}:4222:4222"
       - "127.0.0.1:8222:8222"
     volumes:
-      - "${AGENT_BUS_NATS_DATA:-/home/jordan/.local/share/agent-bus/nats}:/data"
-      - "${AGENT_BUS_NATS_CONFIG:-/home/jordan/.config/agent-bus/nats}:/etc/nats:ro"
+      - "${AGENT_BUS_NATS_DATA:?set AGENT_BUS_NATS_DATA to the JetStream data directory}:/data"
+      - "${AGENT_BUS_NATS_CONFIG:?set AGENT_BUS_NATS_CONFIG to the host-only config directory}:/etc/nats:ro"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
       interval: 10s

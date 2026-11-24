@@ -257,6 +257,8 @@ class Server
             'sentAtMs' => Receipt::nowMs(),
         ];
 
+        // The inbox consumer delivers only messages published after it exists.
+        $this->bus->ensureSessionInbox($resolved);
         $this->bus->publishEnvelope('session.'.$resolved.'.inbox', $envelope, Receipt::inboxMessageId($resolved, $jobId));
         $this->bus->publishEnvelope(
             Receipt::subject($jobId, 'queued'),
