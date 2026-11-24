@@ -341,6 +341,12 @@ class NatsBus
             ->setDeliverPolicy(DeliverPolicy::NEW)
             ->setAckPolicy(AckPolicy::EXPLICIT);
 
+        $inactive = Cli::inboxInactiveSeconds();
+
+        if ($inactive > 0) {
+            $consumer->getConfiguration()->setInactiveThreshold($inactive * 1_000_000_000);
+        }
+
         try {
             $consumer->create();
         } catch (Throwable $exception) {

@@ -6,7 +6,9 @@ use Basis\Nats\Client;
 use Basis\Nats\Configuration;
 use Basis\Nats\Consumer\AckPolicy;
 use Basis\Nats\Consumer\DeliverPolicy;
+use Basis\Nats\Message\Msg;
 use Basis\Nats\Message\Payload;
+use Closure;
 use InvalidArgumentException;
 use JsonException;
 use Throwable;
@@ -340,6 +342,7 @@ class Cli
         $payload = $this->jsonObject($options['payload'] ?? '', 'payload');
         $agentType = $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE');
         $jobId = Receipt::jobId($options['job'] ?? '');
+        $attempt = Receipt::attempt($options['attempt'] ?? null);
         $waitSeconds = max(0.0, (float) ($options['wait-receipt'] ?? 0));
         [$canonical] = $this->canonicalize($sessionId, $agentType);
 
@@ -361,11 +364,12 @@ class Cli
                 'payload' => json_encode($payload, JSON_THROW_ON_ERROR),
             ], requireSession: true);
             $envelope['jobId'] = $jobId;
+            $envelope['attempt'] = $attempt;
             $envelope['sentAtMs'] = Receipt::nowMs();
 
             $this->ensureInboxConsumer($resolved);
-            $this->publish('session.'.$resolved.'.inbox', $envelope, Receipt::inboxMessageId($resolved, $jobId));
-            $this->publishReceipt($jobId, 'queued', $resolved, $agentType);
+            $this->publish('session.'.$resolved.'.inbox', $envelope, Receipt::inboxMessageId($resolved, $jobId, $attempt));
+            $this->publishReceipt($jobId, $attempt, 'queued', $resolved, $agentType);
         } catch (InvalidArgumentException $exception) {
             throw $exception;
         } catch (Throwable $exception) {
@@ -381,7 +385,7 @@ class Cli
         }
 
         try {
-            $receipt = $this->waitForReceipt($jobId, 'delivered', $waitSeconds);
+            $receipt = $this->waitForReceipt($jobId, $attempt, 'delivered', $waitSeconds);
         } catch (Throwable $exception) {
             fwrite(STDERR, $this->oneLine($exception->getMessage())."\n");
 
@@ -402,10 +406,14 @@ class Cli
     /**
      * Wake-on-arrival. Blocks on the session's own durable inbox and fires the
      * moment a message lands: prints it as one JSON line, publishes a
-     * "delivered" receipt keyed by job id, and optionally runs --exec with the
-     * envelope on stdin ("done" or "failed" receipt from its exit code).
-     * With --agent-type it also keeps the session's presence fresh, so an idle
-     * agent stays addressable while it waits.
+     * "delivered" receipt keyed by job id and attempt, and optionally runs
+     * --exec with the envelope on stdin ("done" or "failed" receipt from its
+     * exit code). With --exec the message is acknowledged only after the
+     * command exits, and the listener keeps the message's ack deadline and the
+     * session's presence fresh while it runs, so a crash mid-exec redelivers
+     * the message instead of losing it. With --agent-type it also keeps the
+     * session's presence fresh, so an idle agent stays addressable while it
+     * waits.
      *
      * @param  array<string, string>  $options
      */
@@ -440,36 +448,55 @@ class Cli
 
             while (microtime(true) < $deadline) {
                 if ($agentType !== '' && microtime(true) - $lastBeat >= 30.0) {
-                    $presence = $this->explicitPresence(
-                        $resolved,
-                        $agentType,
-                        $this->option($options, 'model', 'AGENT_BUS_MODEL'),
-                        $this->option($options, 'capabilities', 'AGENT_BUS_CAPABILITIES'),
-                    );
-                    $presence['listening'] = true;
-                    $this->putSession($resolved, json_encode($presence, JSON_THROW_ON_ERROR));
-                    $this->putAliases($aliases, $resolved);
+                    $this->listenPresence($resolved, $agentType, $options, $aliases);
                     $lastBeat = microtime(true);
                 }
 
                 $remaining = $deadline - microtime(true);
-                $envelope = $this->pullInbox($resolved, is_finite($remaining) ? max(0.1, min($poll, $remaining)) : $poll);
+                $pulled = $this->pullInboxMessage($resolved, is_finite($remaining) ? max(0.1, min($poll, $remaining)) : $poll);
 
-                if ($envelope === null) {
+                if ($pulled === null) {
                     continue;
                 }
 
+                [$envelope, $message] = $pulled;
                 $jobId = $this->envelopeJobId($envelope);
-                $this->deliveredReceipt($jobId, $resolved, $agentType, $envelope);
+                $attempt = Receipt::attemptOf($envelope);
+                $this->deliveredReceipt($jobId, $attempt, $resolved, $agentType, $envelope);
 
                 echo json_encode($envelope, JSON_THROW_ON_ERROR)."\n";
                 fflush(STDOUT);
 
-                if ($exec !== '') {
-                    $code = $this->runWake($exec, $envelope, $resolved, $jobId);
+                if ($exec === '') {
+                    $this->ack($message);
+                } else {
+                    $lastProgress = microtime(true);
+                    $tick = function () use ($message, &$lastProgress, &$lastBeat, $resolved, $agentType, $options, $aliases): void {
+                        $now = microtime(true);
+
+                        if ($now - $lastProgress >= 10.0) {
+                            // Push the ack deadline out while the command runs.
+                            $message->progress();
+                            $lastProgress = $now;
+                        }
+
+                        if ($agentType !== '' && $now - $lastBeat >= 30.0) {
+                            $this->listenPresence($resolved, $agentType, $options, $aliases);
+                            $lastBeat = $now;
+                        }
+                    };
+
+                    [$code, $result] = $this->runWake($exec, $envelope, $resolved, $jobId, $attempt, $tick);
+                    $this->ack($message);
 
                     if ($jobId !== null) {
-                        $this->publishReceiptQuietly($jobId, $code === 0 ? 'done' : 'failed', $resolved, $agentType, ['exitCode' => $code]);
+                        $detail = ['exitCode' => $code];
+
+                        if ($result !== null) {
+                            $detail['result'] = $result;
+                        }
+
+                        $this->publishReceiptQuietly($jobId, $attempt, $code === 0 ? 'done' : 'failed', $resolved, $agentType, $detail);
                     }
                 }
 
@@ -491,6 +518,33 @@ class Cli
     }
 
     /**
+     * @param  array<string, string>  $options
+     * @param  list<string>  $aliases
+     */
+    private function listenPresence(string $resolved, string $agentType, array $options, array $aliases): void
+    {
+        $presence = $this->explicitPresence(
+            $resolved,
+            $agentType,
+            $this->option($options, 'model', 'AGENT_BUS_MODEL'),
+            $this->option($options, 'capabilities', 'AGENT_BUS_CAPABILITIES'),
+        );
+        $presence['listening'] = true;
+        $this->putSession($resolved, json_encode($presence, JSON_THROW_ON_ERROR));
+        $this->putAliases($aliases, $resolved);
+    }
+
+    private function ack(Msg $message): void
+    {
+        try {
+            $message->ack();
+        } catch (Throwable $exception) {
+            // Unacked mail is redelivered after the ack wait; say so and go on.
+            fwrite(STDERR, 'ack failed, the message may be redelivered: '.$this->oneLine($exception->getMessage())."\n");
+        }
+    }
+
+    /**
      * Read the furthest receipt for a job, or publish one with --state.
      *
      * @param  array<string, string>  $options
@@ -504,6 +558,7 @@ class Cli
         }
 
         $jobId = Receipt::jobId($jobId);
+        $attempt = Receipt::attempt($options['attempt'] ?? null);
         $state = $options['state'] ?? '';
 
         try {
@@ -512,10 +567,10 @@ class Cli
                 $sessionId = $this->sessionId($options, required: true);
                 $this->requireSubjectSafe($sessionId);
                 $detail = isset($options['payload']) ? $this->jsonObject($options['payload'], 'payload') : [];
-                $receipt = $this->publishReceipt($jobId, $state, $sessionId, $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'), $detail);
+                $receipt = $this->publishReceipt($jobId, $attempt, $state, $sessionId, $this->option($options, 'agent-type', 'AGENT_BUS_AGENT_TYPE'), $detail);
             } else {
                 $until = Receipt::state($options['until'] ?? 'queued');
-                $receipt = $this->waitForReceipt($jobId, $until, max(0.0, (float) ($options['wait'] ?? 0)));
+                $receipt = $this->waitForReceipt($jobId, $attempt, $until, max(0.0, (float) ($options['wait'] ?? 0)));
             }
         } catch (InvalidArgumentException $exception) {
             throw $exception;
@@ -526,7 +581,7 @@ class Cli
         }
 
         if ($receipt === null) {
-            fwrite(STDERR, "no receipt for job {$jobId}\n");
+            fwrite(STDERR, "no receipt for job {$jobId} attempt {$attempt}\n");
 
             return 2;
         }
@@ -540,10 +595,10 @@ class Cli
      * @param  array<string, mixed>  $detail
      * @return array<string, mixed>
      */
-    private function publishReceipt(string $jobId, string $state, string $sessionId, string $agentType = '', array $detail = []): array
+    private function publishReceipt(string $jobId, int $attempt, string $state, string $sessionId, string $agentType = '', array $detail = []): array
     {
-        $receipt = Receipt::envelope($jobId, $state, $sessionId, $agentType, $detail, $this->repo());
-        $this->publish(Receipt::subject($jobId, $state), $receipt);
+        $receipt = Receipt::envelope($jobId, $attempt, $state, $sessionId, $agentType, $detail, $this->repo());
+        $this->publish(Receipt::subject($jobId, $attempt, $state), $receipt);
 
         return $receipt;
     }
@@ -554,10 +609,10 @@ class Cli
      *
      * @param  array<string, mixed>  $detail
      */
-    private function publishReceiptQuietly(string $jobId, string $state, string $sessionId, string $agentType = '', array $detail = []): void
+    private function publishReceiptQuietly(string $jobId, int $attempt, string $state, string $sessionId, string $agentType = '', array $detail = []): void
     {
         try {
-            $this->publishReceipt($jobId, $state, $sessionId, $agentType, $detail);
+            $this->publishReceipt($jobId, $attempt, $state, $sessionId, $agentType, $detail);
         } catch (Throwable $exception) {
             fwrite(STDERR, 'receipt '.$state.' for job '.$jobId.' not published: '.$this->oneLine($exception->getMessage())."\n");
         }
@@ -566,7 +621,7 @@ class Cli
     /**
      * @param  array<string, mixed>  $envelope
      */
-    private function deliveredReceipt(?string $jobId, string $sessionId, string $agentType, array $envelope): void
+    private function deliveredReceipt(?string $jobId, int $attempt, string $sessionId, string $agentType, array $envelope): void
     {
         if ($jobId === null) {
             return;
@@ -574,7 +629,7 @@ class Cli
 
         $sentAt = $envelope['sentAtMs'] ?? null;
         $detail = is_int($sentAt) ? ['latencyMs' => max(0, Receipt::nowMs() - $sentAt)] : [];
-        $this->publishReceiptQuietly($jobId, 'delivered', $sessionId, $agentType, $detail);
+        $this->publishReceiptQuietly($jobId, $attempt, 'delivered', $sessionId, $agentType, $detail);
     }
 
     /**
@@ -590,7 +645,7 @@ class Cli
     /**
      * @return array<string, mixed>|null
      */
-    private function waitForReceipt(string $jobId, string $atLeast, float $seconds): ?array
+    private function waitForReceipt(string $jobId, int $attempt, string $atLeast, float $seconds): ?array
     {
         $deadline = microtime(true) + $seconds;
 
@@ -600,7 +655,7 @@ class Cli
                     continue;
                 }
 
-                $receipt = $this->lastEnvelopeOn(Receipt::subject($jobId, $state));
+                $receipt = $this->lastEnvelopeOn(Receipt::subject($jobId, $attempt, $state));
 
                 if ($receipt !== null && (($receipt['payload']['jobId'] ?? null) === $jobId)) {
                     return $receipt;
@@ -641,34 +696,141 @@ class Cli
     }
 
     /**
-     * Run the wake command with the envelope on stdin. Its stdout and stderr go
-     * to this process's stderr so the listener's stdout stays one JSON line per
-     * message.
+     * Run the wake command with the envelope on stdin (from a 0600 temp file,
+     * so a command that never reads stdin cannot block the listener). Its
+     * stdout and stderr go to this process's stderr so the listener's stdout
+     * stays one JSON line per message. The child gets a scrubbed environment
+     * (no broker credentials, API keys or other secrets) plus
+     * AGENT_BUS_SESSION_ID, AGENT_BUS_JOB_ID, AGENT_BUS_ATTEMPT and
+     * AGENT_BUS_RESULT_FILE; a JSON object written to the result file becomes
+     * the done receipt's result. $tick runs about every 50 ms while it runs.
      *
      * @param  array<string, mixed>  $envelope
+     * @param  (Closure(): void)|null  $tick
+     * @return array{0: int, 1: array<string, mixed>|null}
      */
-    private function runWake(string $command, array $envelope, string $sessionId, ?string $jobId): int
+    private function runWake(string $command, array $envelope, string $sessionId, ?string $jobId, int $attempt, ?Closure $tick = null): array
     {
-        $environment = getenv();
-        $environment['AGENT_BUS_SESSION_ID'] = $sessionId;
-        $environment['AGENT_BUS_JOB_ID'] = $jobId ?? '';
+        $input = tempnam(sys_get_temp_dir(), 'agent-bus-wake-in-');
+        $resultFile = tempnam(sys_get_temp_dir(), 'agent-bus-wake-result-');
+        $stdin = false;
 
-        $process = proc_open(['/bin/sh', '-c', $command], [
-            0 => ['pipe', 'r'],
-            1 => STDERR,
-            2 => STDERR,
-        ], $pipes, null, $environment);
+        try {
+            if ($input === false || $resultFile === false) {
+                fwrite(STDERR, "wake command did not start: no temp file\n");
 
-        if (! is_resource($process)) {
-            fwrite(STDERR, "wake command did not start\n");
+                return [127, null];
+            }
 
-            return 127;
+            chmod($input, 0600);
+            chmod($resultFile, 0600);
+            file_put_contents($input, json_encode($envelope, JSON_THROW_ON_ERROR)."\n");
+            $stdin = fopen($input, 'r');
+
+            $environment = self::wakeEnvironment(getenv());
+            $environment['AGENT_BUS_SESSION_ID'] = $sessionId;
+            $environment['AGENT_BUS_JOB_ID'] = $jobId ?? '';
+            $environment['AGENT_BUS_ATTEMPT'] = (string) $attempt;
+            $environment['AGENT_BUS_RESULT_FILE'] = $resultFile;
+
+            $process = $stdin === false ? false : proc_open(['/bin/sh', '-c', $command], [
+                0 => $stdin,
+                1 => STDERR,
+                2 => STDERR,
+            ], $pipes, null, $environment);
+
+            if (! is_resource($process)) {
+                fwrite(STDERR, "wake command did not start\n");
+
+                return [127, null];
+            }
+
+            while (true) {
+                $status = proc_get_status($process);
+
+                if (! $status['running']) {
+                    // exitcode is only reported the first time running is false.
+                    $code = $status['signaled'] ? 128 + $status['termsig'] : $status['exitcode'];
+
+                    break;
+                }
+
+                if ($tick !== null) {
+                    try {
+                        $tick();
+                    } catch (Throwable $exception) {
+                        fwrite(STDERR, 'listener heartbeat failed: '.$this->oneLine($exception->getMessage())."\n");
+                    }
+                }
+
+                usleep(50_000);
+            }
+
+            proc_close($process);
+
+            return [$code, self::wakeResult($resultFile)];
+        } finally {
+            if (is_resource($stdin)) {
+                fclose($stdin);
+            }
+
+            foreach ([$input, $resultFile] as $file) {
+                if (is_string($file) && is_file($file)) {
+                    unlink($file);
+                }
+            }
+        }
+    }
+
+    /**
+     * The environment a wake command inherits: everything except credentials.
+     * NATS_URL survives only when it carries no user:password.
+     *
+     * @param  array<string, string>  $environment
+     * @return array<string, string>
+     */
+    public static function wakeEnvironment(array $environment): array
+    {
+        return array_filter(
+            $environment,
+            static fn (string $value, string|int $name): bool => ! self::isSecretEnv((string) $name, $value),
+            ARRAY_FILTER_USE_BOTH,
+        );
+    }
+
+    private static function isSecretEnv(string $name, string $value): bool
+    {
+        $upper = strtoupper($name);
+
+        if ($upper === 'NATS_URL') {
+            return str_contains($value, '@');
         }
 
-        fwrite($pipes[0], json_encode($envelope, JSON_THROW_ON_ERROR)."\n");
-        fclose($pipes[0]);
+        if (preg_match('/^(NATS_|TYPESAFE_|COORD_DB_|COORD_TEST_)/', $upper) === 1) {
+            return true;
+        }
 
-        return proc_close($process);
+        return preg_match('/(TOKEN|SECRET|PASSW|^PASS$|_PASS$|API_?KEY|PRIVATE_?KEY|CREDENTIAL|_CREDS$|NKEY|^AUTH_|_AUTH$|SESSION_KEY)/', $upper) === 1;
+    }
+
+    /** @return array<string, mixed>|null */
+    private static function wakeResult(string $file): ?array
+    {
+        $json = is_file($file) ? file_get_contents($file, length: 65_536) : false;
+
+        if (! is_string($json) || trim($json) === '') {
+            return null;
+        }
+
+        $decoded = json_decode($json, true);
+
+        if (! is_array($decoded) || array_is_list($decoded)) {
+            fwrite(STDERR, "AGENT_BUS_RESULT_FILE did not hold a JSON object; ignoring it\n");
+
+            return null;
+        }
+
+        return $decoded;
     }
 
     /**
@@ -745,7 +907,14 @@ class Cli
             }
 
             $this->requireSubjectSafe($resolved);
-            $envelope = $this->pullInbox($resolved);
+            $pulled = $this->pullInboxMessage($resolved, $this->inboxExpires());
+
+            if ($pulled !== null) {
+                // The inbox verb hands the message to its caller: ack now (at most once).
+                $this->ack($pulled[1]);
+            }
+
+            $envelope = $pulled[0] ?? null;
         } catch (InvalidArgumentException $exception) {
             throw $exception;
         } catch (Throwable $exception) {
@@ -758,7 +927,7 @@ class Cli
             return 2;
         }
 
-        $this->deliveredReceipt($this->envelopeJobId($envelope), $resolved, $agentType, $envelope);
+        $this->deliveredReceipt($this->envelopeJobId($envelope), Receipt::attemptOf($envelope), $resolved, $agentType, $envelope);
 
         echo json_encode($envelope, JSON_THROW_ON_ERROR)."\n";
 
@@ -791,6 +960,13 @@ class Cli
             ->setDeliverPolicy(DeliverPolicy::NEW)
             ->setAckPolicy(AckPolicy::EXPLICIT);
 
+        $inactive = self::inboxInactiveSeconds();
+
+        if ($inactive > 0) {
+            // An abandoned session's consumer goes away on its own.
+            $consumer->getConfiguration()->setInactiveThreshold($inactive * 1_000_000_000);
+        }
+
         try {
             $consumer->create();
         } catch (Throwable $exception) {
@@ -804,25 +980,56 @@ class Cli
         }
     }
 
-    /** @return array<string, mixed>|null */
-    private function pullInbox(string $sessionId, ?float $expiresSeconds = null): ?array
+    /**
+     * Seconds without a pull before NATS removes an inbox consumer; matches the
+     * stream's 7-day max age. 0 keeps consumers forever.
+     */
+    public static function inboxInactiveSeconds(): int
+    {
+        $value = getenv('AGENT_BUS_INBOX_INACTIVE_SECONDS');
+
+        return is_string($value) && $value !== '' ? max(0, (int) $value) : 604_800;
+    }
+
+    private function inboxExpires(): float
+    {
+        $expires = getenv('AGENT_BUS_INBOX_EXPIRES');
+        $seconds = is_string($expires) ? (float) $expires : 0.0;
+
+        return $seconds > 0 ? $seconds : 0.5;
+    }
+
+    /**
+     * Pull one message from the session's inbox without acknowledging it.
+     * The caller acks (inbox: at once; listen --exec: after the command).
+     *
+     * @return array{0: array<string, mixed>, 1: Msg}|null
+     */
+    private function pullInboxMessage(string $sessionId, float $expiresSeconds): ?array
     {
         $this->ensureInboxConsumer($sessionId);
         $consumer = $this->client()->getApi()->getStream($this->streamName())->getConsumer(self::inboxConsumerName($sessionId));
-
-        $expires = getenv('AGENT_BUS_INBOX_EXPIRES');
-        $seconds = $expiresSeconds ?? (is_string($expires) ? (float) $expires : 0.0);
-        $consumer->setIterations(1);
         $consumer->setBatching(1);
-        $consumer->setExpires($seconds > 0 ? $seconds : 0.5);
+        $consumer->setExpires($expiresSeconds);
 
-        $got = null;
-        $consumer->handle(function (Payload $payload) use (&$got): void {
-            $decoded = json_decode($payload->body, true);
-            $got = is_array($decoded) ? $decoded : ['raw' => $payload->body];
-        });
+        $queue = $consumer->getQueue();
+        $queue->setTimeout($expiresSeconds + 0.5);
 
-        return $got;
+        try {
+            foreach ($queue->fetchAll(1) as $message) {
+                if (! $message instanceof Msg || $message->payload->isEmpty()) {
+                    continue;
+                }
+
+                $decoded = json_decode($message->payload->body, true);
+
+                return [is_array($decoded) ? $decoded : ['raw' => $message->payload->body], $message];
+            }
+        } finally {
+            $this->client()->unsubscribe($queue);
+        }
+
+        return null;
     }
 
     private function deleteInboxConsumer(string $sessionId): void
@@ -1499,11 +1706,11 @@ class Cli
         fwrite(STDERR, <<<'TXT'
 Usage:
   bin/agent-bus emit --type=<type> --agent-type=<name> [--payload=<json>] [--session=<id>] [--model=<name>]
-  bin/agent-bus send --session=<id-or-alias> --payload=<json> [--job=<id>] [--wait-receipt=<seconds>]
+  bin/agent-bus send --session=<id-or-alias> --payload=<json> [--job=<id>] [--attempt=<n>] [--wait-receipt=<seconds>]
   bin/agent-bus inbox --session=<id-or-alias>
   bin/agent-bus listen --session=<id> [--agent-type=<name>] [--exec=<cmd>] [--max=<n>] [--for=<seconds>]
-  bin/agent-bus receipt --job=<id> [--until=<queued|delivered|done|failed>] [--wait=<seconds>]
-  bin/agent-bus receipt --job=<id> --state=<delivered|done|failed> --session=<id> [--payload=<json>]
+  bin/agent-bus receipt --job=<id> [--attempt=<n>] [--until=<queued|delivered|done|failed>] [--wait=<seconds>]
+  bin/agent-bus receipt --job=<id> [--attempt=<n>] --state=<delivered|done|failed> --session=<id> [--payload=<json>]
   bin/agent-bus heartbeat --session=<id> [--agent-type=<name>] [--model=<name>]
   bin/agent-bus session-end --session=<id-or-alias>
   bin/agent-bus sessions [--ids]

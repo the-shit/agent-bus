@@ -63,7 +63,7 @@ This is load-bearing and easy to get backwards.
 
 ## Delivery
 
-The inbox is at-most-once. `inbox` acks on pull, and `session-end` drops the consumer along with any unread mail. Senders must create the target's inbox consumer before publishing (`NatsBus::ensureSessionInbox`, `Cli::ensureInboxConsumer`). Never run `provision` against a live broker without telling its owner: it rewrites the stream to 7-day, 1 GiB, and 256 KiB-per-message limits.
+The inbox is at-most-once, except `listen --exec`, which acks after the command exits (at least once; wake commands must tolerate a repeat of the same job id and attempt). Receipts and inbox msg-ids are keyed by job id **and attempt** (`work.receipt.{jobId}.{attempt}.{state}`); never drop the attempt, or a requeued coord job is silently deduped or sees the old `failed`. `inbox` acks on pull, and `session-end` drops the consumer along with any unread mail. Senders must create the target's inbox consumer before publishing (`NatsBus::ensureSessionInbox`, `Cli::ensureInboxConsumer`). Never run `provision` against a live broker without telling its owner: it rewrites the stream to 7-day, 1 GiB, and 256 KiB-per-message limits.
 
 ## Tests
 
